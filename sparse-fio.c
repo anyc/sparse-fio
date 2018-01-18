@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
 	
 	infile = outfile = 0;
 	no_fsync = write_packed = force = 0;
-	while ((c = getopt(argc, argv, "Spfi:o:")) != -1) {
+	while ((c = getopt(argc, argv, "hSpfi:o:")) != -1) {
 		switch (c) {
 			case 'S':
 				no_fsync = 1;
@@ -75,9 +75,16 @@ int main(int argc, char **argv) {
 			case 'o':
 				outfile = optarg;
 				break;
+			case 'h':
 			default:
-				fprintf(stderr, "error while parsing parameters\n");
-				fprintf(stderr, "Usage: %s <infile> <outfile>\n", argv[0]);
+				fprintf(stderr, "Usage: %s [args] [<inputfile> <outputfile>]\n", argv[0]);
+				fprintf(stderr, "\n");
+				fprintf(stderr, "Optional arguments:\n");
+				fprintf(stderr, " -f              # force (overwrite existing file)\n");
+				fprintf(stderr, " -i <inputfile>   \n");
+				fprintf(stderr, " -o <outputfile>  \n");
+				fprintf(stderr, " -p              # write output in packed format\n");
+				fprintf(stderr, " -S              # do not flush caches\n");
 				return 1;
 		}
 	}
@@ -128,7 +135,7 @@ int main(int argc, char **argv) {
 		isize = stat.st_size;
 	}
 	
-	printf("Input size:     %16zu\n", isize);
+	printf("Input size:     %16zu (%zu MB)\n", isize, isize / 1024 / 1024);
 	
 	if (try_fiemap) {
 		fiemap_size = sizeof(struct fiemap);
@@ -173,7 +180,7 @@ int main(int argc, char **argv) {
 		for (i=0;i<fiemap->fm_mapped_extents;i++) {
 			isize_alloc += fiemap->fm_extents[i].fe_length;
 		}
-		printf("Non-zero bytes: %16zu\n", isize_alloc);
+		printf("Non-zero bytes: %16zu (%zu MB)\n", isize_alloc, isize_alloc / 1024 / 1024);
 	} else {
 		isize_alloc = isize;
 	}
@@ -211,6 +218,8 @@ int main(int argc, char **argv) {
 		osize = dev_size;
 		
 		output_is_block = 1;
+		
+		printf("Target size:    %16zu (%zu MB)\n", osize, osize / 1024 / 1024);
 	} else {
 		if (output_exists && !force) {
 			fprintf(stderr, "will not overwrite output file, use -f to overwrite the file\n");
@@ -223,9 +232,9 @@ int main(int argc, char **argv) {
 			osize = isize;
 		
 		output_is_block = 0;
+		
+		printf("Output size:    %16zu (%zu MB)\n", osize, osize / 1024 / 1024);
 	}
-	
-	printf("Output size:    %16zu\n", osize);
 	
 	if (osize < isize_alloc) {
 		fprintf(stderr, "error, target size is smaller than source (%zu < %zu)\n", osize, isize_alloc);
@@ -257,6 +266,7 @@ int main(int argc, char **argv) {
 	written = 0;
 	
 	#ifndef NO_BENCHMARK
+	#define TIMEVAL_FAC 1000000000
 	struct timeval time_start, time_end;
 	double time_diff;
 	
@@ -311,6 +321,16 @@ int main(int argc, char **argv) {
 			write(ofd, input + fiemap->fm_extents[i].fe_logical, fiemap->fm_extents[i].fe_length);
 			
 			written += fiemap->fm_extents[i].fe_length;
+			
+			#ifndef NO_BENCHMARK
+			if (i > 0) {
+				// move cursor up one line, erase line, return cursor to first column
+				printf("\033[A\33[2K\r");
+			}
+			printf("written %.3f MB\n",
+				  (float) written / 1024 / 1024
+			);
+			#endif
 		}
 	} else {
 		size_t page_size, i, ioffset, block_size;
@@ -364,6 +384,17 @@ int main(int argc, char **argv) {
 				}
 			}
 			
+			#ifndef NO_BENCHMARK
+			if (ioffset > 0) {
+				// move cursor up one line, erase line, return cursor to first column
+				printf("\033[A\33[2K\r");
+			}
+			printf("read %.3f MB, written %.3f MB\n",
+				  (float) ioffset / 1024 / 1024,
+				  (float) written / 1024 / 1024
+				 );
+			#endif
+			
 			ioffset += block_size;
 		}
 	}
@@ -384,11 +415,13 @@ int main(int argc, char **argv) {
 	free(fiemap);
 	
 	#ifndef NO_BENCHMARK
-	#define TIMEVAL_FAC 1000000000
 	
 	gettimeofday(&time_end, NULL);
 	time_diff = (double)(time_end.tv_sec - time_start.tv_sec)*TIMEVAL_FAC + (time_end.tv_usec - time_start.tv_usec);
 	
-	printf("written %f MB in %f s -> %f MB/s\n", (float) written / 1000000, time_diff / TIMEVAL_FAC, ((float) written / 1000000) / (time_diff / TIMEVAL_FAC));
+	// move cursor up one line, erase line, return cursor to first column
+	printf("\033[A\33[2K\r");
+	
+	printf("written %f MB in %f s -> %f MB/s\n", (float) written / 1024 / 1024, time_diff / TIMEVAL_FAC, ((float) written / 1024 / 1024) / (time_diff / TIMEVAL_FAC));
 	#endif
 }
