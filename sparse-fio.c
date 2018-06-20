@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <endian.h>
+#include <limits.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -53,18 +54,22 @@ int main(int argc, char **argv) {
 	void *input, *output;
 	struct stat stat;
 	char try_fiemap, no_fsync, write_packed, force, output_exists;
-	char output_is_block;
+	char output_is_block, discard;
 	
 	
 	infile = outfile = 0;
 	no_fsync = write_packed = force = 0;
-	while ((c = getopt(argc, argv, "hSpfi:o:")) != -1) {
+	discard = 1;
+	while ((c = getopt(argc, argv, "hDSpfi:o:")) != -1) {
 		switch (c) {
 			case 'S':
 				no_fsync = 1;
 				break;
 			case 'p':
 				write_packed = 1;
+				break;
+			case 'D':
+				discard = 0;
 				break;
 			case 'f':
 				force = 1;
@@ -80,11 +85,12 @@ int main(int argc, char **argv) {
 				fprintf(stderr, "Usage: %s [args] [<inputfile> <outputfile>]\n", argv[0]);
 				fprintf(stderr, "\n");
 				fprintf(stderr, "Optional arguments:\n");
-				fprintf(stderr, " -f              # force (overwrite existing file)\n");
-				fprintf(stderr, " -i <inputfile>   \n");
-				fprintf(stderr, " -o <outputfile>  \n");
-				fprintf(stderr, " -p              # write output in packed format\n");
-				fprintf(stderr, " -S              # do not flush caches\n");
+				fprintf(stderr, " -f              force (overwrite existing file)\n");
+				fprintf(stderr, " -D              do not discard data on target device\n");
+				fprintf(stderr, " -i <inputfile>  \n");
+				fprintf(stderr, " -o <outputfile> \n");
+				fprintf(stderr, " -p              write output in packed format\n");
+				fprintf(stderr, " -S              do not flush caches\n");
 				return 1;
 		}
 	}
@@ -250,6 +256,17 @@ int main(int argc, char **argv) {
 		if (ftruncate(ofd, 0) < 0) {
 			fprintf(stderr, "ftruncate failed: %s\n", strerror(errno));
 			return 1;
+		}
+	} else {
+		if (discard) {
+			uint64_t range[2];
+			
+			range[0] = 0;
+			range[1] = ULLONG_MAX;
+			
+			ret = ioctl(ofd, BLKDISCARD, &range);
+			if (ret < 0)
+				fprintf(stderr, "BLKDISCARD ioctl failed: %s", strerror(errno));
 		}
 	}
 	
