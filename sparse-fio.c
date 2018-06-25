@@ -141,7 +141,7 @@ int main(int argc, char **argv) {
 		isize = stat.st_size;
 	}
 	
-	printf("Input size:     %16zu (%zu MB)\n", isize, isize / 1024 / 1024);
+	printf("Input size:     %16zu (%6zu MB)\n", isize, isize / 1024 / 1024);
 	
 	// check if we can get a fiemap for the input file (fiemap contains information
 	// about sparse/zero blocks in the file)
@@ -189,7 +189,7 @@ int main(int argc, char **argv) {
 		for (i=0;i<fiemap->fm_mapped_extents;i++) {
 			isize_alloc += fiemap->fm_extents[i].fe_length;
 		}
-		printf("Non-zero bytes: %16zu (%zu MB)\n", isize_alloc, isize_alloc / 1024 / 1024);
+		printf("Non-zero bytes: %16zu (%6zu MB)\n", isize_alloc, isize_alloc / 1024 / 1024);
 	} else {
 		isize_alloc = isize;
 	}
@@ -229,7 +229,7 @@ int main(int argc, char **argv) {
 		
 		output_is_block = 1;
 		
-		printf("Target size:    %16zu (%zu MB)\n", osize, osize / 1024 / 1024);
+		printf("Target size:    %16zu (%6zu MB)\n", osize, osize / 1024 / 1024);
 	} else {
 		if (output_exists && !force) {
 			fprintf(stderr, "will not overwrite output file, use -f to overwrite the file\n");
@@ -243,7 +243,7 @@ int main(int argc, char **argv) {
 		
 		output_is_block = 0;
 		
-		printf("Output size:    %16zu (%zu MB)\n", osize, osize / 1024 / 1024);
+		printf("Output size:    %16zu (%6zu MB)\n", osize, osize / 1024 / 1024);
 	}
 	
 	if (osize < isize_alloc) {

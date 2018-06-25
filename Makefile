@@ -8,4 +8,4 @@ all: $(app)
 $(app): $(app).c
 
 clean:
-	rm $(app)
+	rm -f $(app)
