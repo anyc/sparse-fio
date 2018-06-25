@@ -86,11 +86,11 @@ int main(int argc, char **argv) {
 				fprintf(stderr, "\n");
 				fprintf(stderr, "Optional arguments:\n");
 				fprintf(stderr, " -f              force (overwrite existing file)\n");
-				fprintf(stderr, " -D              do not discard data on target device\n");
+				fprintf(stderr, " -D              do not discard data on target device before writing\n");
 				fprintf(stderr, " -i <inputfile>  \n");
 				fprintf(stderr, " -o <outputfile> \n");
-				fprintf(stderr, " -p              write output in packed format\n");
-				fprintf(stderr, " -S              do not flush caches\n");
+				fprintf(stderr, " -p              write output in own packed format\n");
+				fprintf(stderr, " -S              do not wait for completion using fsync\n");
 				return 1;
 		}
 	}
@@ -143,6 +143,8 @@ int main(int argc, char **argv) {
 	
 	printf("Input size:     %16zu (%zu MB)\n", isize, isize / 1024 / 1024);
 	
+	// check if we can get a fiemap for the input file (fiemap contains information
+	// about sparse/zero blocks in the file)
 	if (try_fiemap) {
 		fiemap_size = sizeof(struct fiemap);
 		fiemap = (struct fiemap*) calloc(1, fiemap_size);
@@ -161,6 +163,7 @@ int main(int argc, char **argv) {
 		}
 	}
 	
+	// if available, get detailed information about sparse blocks
 	if (fiemap) {
 		int i;
 		
@@ -214,6 +217,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	
+	// check if output file is a block device
 	if (S_ISBLK(stat.st_mode)) {
 		long long dev_size;
 		
@@ -247,17 +251,21 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	
+	// increase required file size if we use our own packed format for the output file
 	if (write_packed) {
 		osize += sizeof(struct sparse_fio_header) + sizeof(struct sparse_fio_v1_header) +
 			sizeof(struct sparse_fio_v1_block);
 	}
 	
 	if (!output_is_block) {
+		// erase content of the output file
 		if (ftruncate(ofd, 0) < 0) {
 			fprintf(stderr, "ftruncate failed: %s\n", strerror(errno));
 			return 1;
 		}
 	} else {
+		// issue a discard command that tells the device controller to forget about
+		// previously stored data
 		if (discard) {
 			uint64_t range[2];
 			
@@ -271,7 +279,7 @@ int main(int argc, char **argv) {
 	}
 	
 	
-	
+	// map the files into memory
 	input =  mmap(0, isize, PROT_READ, MAP_SHARED, ifd, 0);
 	output = mmap(0, osize, PROT_WRITE, MAP_SHARED, ofd, 0);
 	
@@ -290,6 +298,7 @@ int main(int argc, char **argv) {
 	gettimeofday(&time_start, NULL);
 	#endif
 	
+	// write the header of our packed format
 	if (write_packed) {
 		struct sparse_fio_header hdr = { "SPARSE_FIO", 1, 0 };
 		
@@ -300,6 +309,8 @@ int main(int argc, char **argv) {
 		output += sizeof(hdr);
 	}
 	
+	// if we have a fiemap of our input file, we will only read and write the blocks with actual data
+	// if not, we read every block and check ourselves if the block contains only zeros
 	if (fiemap) {
 		int i;
 		
@@ -419,6 +430,7 @@ int main(int argc, char **argv) {
 	munmap(output, osize);
 	munmap(input, isize);
 	
+	// fsync() will block until all data is written to the disk
 	if (!no_fsync) {
 		ret = fsync(ofd);
 		if (ret < 0) {
