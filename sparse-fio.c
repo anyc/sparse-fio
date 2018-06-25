@@ -8,6 +8,7 @@
  * 
  */
 
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,6 +28,13 @@
 #include <linux/fs.h>
 #include <linux/fiemap.h>
 
+#ifndef NO_BENCHMARK
+#include <time.h>
+
+#define TIMEVAL_FAC 1000000000
+#define SPEED_SLOTS 10
+#endif
+
 struct sparse_fio_v1_block {
 	uint64_t start;
 	uint64_t size;
@@ -44,6 +52,110 @@ struct sparse_fio_header {
 	uint8_t version;
 	uint8_t flags;
 };
+
+void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *written, size_t total_bytes) {
+	ssize_t r;
+	size_t j;
+	size_t write_block_size;
+	
+	static size_t prev_start = 0;
+	static size_t prev_size = 0;
+	
+	#ifndef NO_BENCHMARK
+	static size_t written_in_slot = 0;
+	static struct timespec timestamp, prev_timestamp;
+	static float speed[SPEED_SLOTS] = { 0 };
+	static unsigned int cur_slot = 0;
+	static float avg_speed = 0;
+	#endif
+	
+	#ifndef NO_BENCHMARK
+	if (prev_size == 0)
+		clock_gettime(CLOCK_MONOTONIC, &prev_timestamp);
+	#endif
+	
+	write_block_size = 8 * 1024 * 1024;
+	for (j=0; j < length; j += write_block_size) {
+		if (j + write_block_size > length)
+			write_block_size = length - j;
+		
+		// copy data into the kernel's write buffer
+		r = write(fd, buffer + j, write_block_size);
+		if (r < write_block_size) {
+			fprintf(stderr, "write failed (%zd): %s\n", r, strerror(errno));
+			exit(errno);
+		}
+		
+		// start "flush to disk" of the current blocks asynchronously
+		sync_file_range(fd, foff, write_block_size, SYNC_FILE_RANGE_WRITE);
+		
+		if (prev_size > 0) {
+			// wait until all writes of the previous blocks have finished
+			sync_file_range(fd, prev_start, prev_size, SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER);
+			
+			// tell the kernel that we will not need the previous blocks anymore
+			posix_fadvise(fd, prev_start, prev_size, POSIX_FADV_DONTNEED);
+		}
+		
+		*written += write_block_size;
+		
+		#ifndef NO_BENCHMARK
+		double time_diff;
+		
+		clock_gettime(CLOCK_MONOTONIC, &timestamp);
+		
+		if (prev_size > 0)
+			time_diff = (double)(timestamp.tv_sec - prev_timestamp.tv_sec)*TIMEVAL_FAC + (timestamp.tv_nsec - prev_timestamp.tv_nsec);
+		else
+			time_diff = 0;
+		
+		written_in_slot += prev_size;
+		
+		if (time_diff >= 1000000000) {
+			unsigned int k, weight;
+			
+			speed[cur_slot] = ((float) written_in_slot) / (time_diff / TIMEVAL_FAC);
+			written_in_slot = 0;
+			
+			weight = 0;
+			avg_speed = 0;
+			for (k=0; k < SPEED_SLOTS; k++) {
+				if (speed[k] > 0) {
+					avg_speed += speed[k];
+					weight += 1;
+				}
+			}
+			avg_speed = avg_speed / weight;
+			
+// 			printf("%7.3f MB/s (avg: %7.3f MB/s) time left: %4u s\n", speed[cur_slot] / 1024 / 1024, avg_speed / 1024 / 1024, (unsigned int) ((total_bytes - *written) / avg_speed));
+			
+			if (cur_slot >= SPEED_SLOTS-1)
+				cur_slot = 0;
+			else
+				cur_slot += 1;
+			
+			prev_timestamp = timestamp;
+		} else {
+// 			printf("\n");
+		}
+		
+		if (prev_size > 0) {
+			// move cursor up one line, erase line, return cursor to first column
+			printf("\033[A\33[2K\r");
+		}
+		printf("written %5.3f MB ",
+			  (float) *written / 1024 / 1024
+			);
+		printf("%7.3f MB/s time left: %4.1f s\n", avg_speed / 1024 / 1024, (total_bytes - *written) / avg_speed);
+		#endif
+		
+		prev_start = foff;
+		foff += write_block_size;
+		
+		prev_size = write_block_size;
+	}
+}
+
 
 int main(int argc, char **argv) {
 	char *infile, *outfile;
@@ -178,7 +290,10 @@ int main(int argc, char **argv) {
 			}
 		}
 		
+		memset(fiemap->fm_extents, 0, extents_size);
+		
 		fiemap->fm_extent_count = fiemap->fm_mapped_extents;
+		fiemap->fm_mapped_extents = 0;
 		
 		if (ioctl(ifd, FS_IOC_FIEMAP, fiemap) < 0) {
 			fprintf(stderr, "ioctl(fiemap) 2 failed: %s\n", strerror(errno));
@@ -274,7 +389,7 @@ int main(int argc, char **argv) {
 			
 			ret = ioctl(ofd, BLKDISCARD, &range);
 			if (ret < 0)
-				fprintf(stderr, "BLKDISCARD ioctl failed: %s", strerror(errno));
+				fprintf(stderr, "BLKDISCARD ioctl failed: %s\n", strerror(errno));
 		}
 	}
 	
@@ -291,11 +406,10 @@ int main(int argc, char **argv) {
 	written = 0;
 	
 	#ifndef NO_BENCHMARK
-	#define TIMEVAL_FAC 1000000000
-	struct timeval time_start, time_end;
+	struct timespec time_start, time_end;
 	double time_diff;
 	
-	gettimeofday(&time_start, NULL);
+	clock_gettime(CLOCK_MONOTONIC, &time_start);
 	#endif
 	
 	// write the header of our packed format
@@ -344,26 +458,17 @@ int main(int argc, char **argv) {
 				if (foff != fiemap->fm_extents[i].fe_logical) {
 					fprintf(stderr, "lseek failed (%" PRIdMAX " != %llu): %s\n", foff, fiemap->fm_extents[i].fe_logical, strerror(errno));
 				}
+			} else {
+				foff = lseek(ofd, 0, SEEK_CUR);
 			}
 			
-			write(ofd, input + fiemap->fm_extents[i].fe_logical, fiemap->fm_extents[i].fe_length);
-			
-			written += fiemap->fm_extents[i].fe_length;
-			
-			#ifndef NO_BENCHMARK
-			if (i > 0) {
-				// move cursor up one line, erase line, return cursor to first column
-				printf("\033[A\33[2K\r");
-			}
-			printf("written %.3f MB\n",
-				  (float) written / 1024 / 1024
-			);
-			#endif
+			write_helper(ofd, foff, input + fiemap->fm_extents[i].fe_logical, fiemap->fm_extents[i].fe_length, &written, isize_alloc);
 		}
 	} else {
 		size_t page_size, i, ioffset, block_size;
 		struct sparse_fio_v1_block *last_block;
 		struct sparse_fio_v1_block v1_block;
+		off_t foff;
 		
 		// use page size for now
 		page_size = sysconf(_SC_PAGE_SIZE);
@@ -397,12 +502,16 @@ int main(int argc, char **argv) {
 					}
 				}
 				
+				// TODO check if write_helper() makes sense here if we keep working
+				// with page-sized blocks
 				write(ofd, input + ioffset, block_size);
 				written += block_size;
+				
+// 				foff = lseek(ofd, 0, SEEK_CUR);
+// 				write_helper(ofd, foff, input + ioffset, block_size, &written);
+				
 				output += block_size;
 			} else {
-				off_t foff;
-				
 				last_block = 0;
 				
 				foff = lseek(ofd, block_size, SEEK_CUR);
@@ -445,8 +554,8 @@ int main(int argc, char **argv) {
 	
 	#ifndef NO_BENCHMARK
 	
-	gettimeofday(&time_end, NULL);
-	time_diff = (double)(time_end.tv_sec - time_start.tv_sec)*TIMEVAL_FAC + (time_end.tv_usec - time_start.tv_usec);
+	clock_gettime(CLOCK_MONOTONIC, &time_end);
+	time_diff = (double)(time_end.tv_sec - time_start.tv_sec)*TIMEVAL_FAC + (time_end.tv_nsec - time_start.tv_nsec);
 	
 	// move cursor up one line, erase line, return cursor to first column
 	printf("\033[A\33[2K\r");
