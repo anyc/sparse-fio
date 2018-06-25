@@ -58,6 +58,7 @@ void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *writt
 	size_t j;
 	size_t write_block_size;
 	
+	// TODO create a session struct to avoid static variables
 	static size_t prev_start = 0;
 	static size_t prev_size = 0;
 	
@@ -385,11 +386,11 @@ int main(int argc, char **argv) {
 			uint64_t range[2];
 			
 			range[0] = 0;
-			range[1] = ULLONG_MAX;
+			range[1] = osize;
 			
 			ret = ioctl(ofd, BLKDISCARD, &range);
 			if (ret < 0)
-				fprintf(stderr, "BLKDISCARD ioctl failed: %s\n", strerror(errno));
+				fprintf(stderr, "optional BLKDISCARD ioctl failed: %s\n", strerror(errno));
 		}
 	}
 	
