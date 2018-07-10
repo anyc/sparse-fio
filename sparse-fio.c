@@ -35,11 +35,13 @@
 #define SPEED_SLOTS 10
 #endif
 
+// header struct of a single block
 struct sparse_fio_v1_block {
 	uint64_t start;
 	uint64_t size;
 };
 
+// version-specific header struct 
 struct sparse_fio_v1_header {
 	uint64_t n_blocks;
 	struct sparse_fio_v1_block blocks[0];
@@ -47,12 +49,14 @@ struct sparse_fio_v1_header {
 
 #define SPARSE_FIO_FLAG_HAS_TOC 1<<0
 
+// header struct of the own sfio file format
 struct sparse_fio_header {
 	uint8_t magic[10];
 	uint8_t version;
 	uint8_t flags;
 };
 
+// helper function to write a given amount of data to a file descriptor
 void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *written, size_t total_bytes) {
 	ssize_t r;
 	size_t j;
@@ -68,9 +72,7 @@ void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *writt
 	static float speed[SPEED_SLOTS] = { 0 };
 	static unsigned int cur_slot = 0;
 	static float avg_speed = 0;
-	#endif
 	
-	#ifndef NO_BENCHMARK
 	if (prev_size == 0)
 		clock_gettime(CLOCK_MONOTONIC, &prev_timestamp);
 	#endif
@@ -120,12 +122,14 @@ void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *writt
 		
 		written_in_slot += prev_size;
 		
+		// only update the stats every second
 		if (time_diff >= 1000000000) {
 			unsigned int k, weight;
 			
 			speed[cur_slot] = ((float) written_in_slot) / (time_diff / TIMEVAL_FAC);
 			written_in_slot = 0;
 			
+			// calculate an average speed based on past time slots
 			weight = 0;
 			avg_speed = 0;
 			for (k=0; k < SPEED_SLOTS; k++) {
@@ -136,16 +140,12 @@ void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *writt
 			}
 			avg_speed = avg_speed / weight;
 			
-// 			printf("%7.3f MB/s (avg: %7.3f MB/s) time left: %4u s\n", speed[cur_slot] / 1024 / 1024, avg_speed / 1024 / 1024, (unsigned int) ((total_bytes - *written) / avg_speed));
-			
 			if (cur_slot >= SPEED_SLOTS-1)
 				cur_slot = 0;
 			else
 				cur_slot += 1;
 			
 			prev_timestamp = timestamp;
-		} else {
-// 			printf("\n");
 		}
 		
 		if (prev_size > 0) {
@@ -210,7 +210,7 @@ int main(int argc, char **argv) {
 				fprintf(stderr, " -D              do not discard data on target device before writing\n");
 				fprintf(stderr, " -i <inputfile>  \n");
 				fprintf(stderr, " -o <outputfile> \n");
-				fprintf(stderr, " -p              write output in own packed format\n");
+				fprintf(stderr, " -p              write output in packed SFIO format\n");
 				fprintf(stderr, " -S              do not wait for completion using fsync\n");
 				return 1;
 		}
