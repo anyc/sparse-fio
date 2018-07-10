@@ -88,11 +88,19 @@ void write_helper(int fd, off_t foff, char *buffer, size_t length, size_t *writt
 		}
 		
 		// start "flush to disk" of the current blocks asynchronously
-		sync_file_range(fd, foff, write_block_size, SYNC_FILE_RANGE_WRITE);
+		r = sync_file_range(fd, foff, write_block_size, SYNC_FILE_RANGE_WRITE);
+		if (r < 0) {
+			fprintf(stderr, "sync_file_range 1 failed (%zd): %s\n", r, strerror(errno));
+			exit(errno);
+		}
 		
 		if (prev_size > 0) {
 			// wait until all writes of the previous blocks have finished
-			sync_file_range(fd, prev_start, prev_size, SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER);
+			r = sync_file_range(fd, prev_start, prev_size, SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER);
+			if (r < 0) {
+				fprintf(stderr, "sync_file_range 2 failed (%zd): %s\n", r, strerror(errno));
+				exit(errno);
+			}
 			
 			// tell the kernel that we will not need the previous blocks anymore
 			posix_fadvise(fd, prev_start, prev_size, POSIX_FADV_DONTNEED);
