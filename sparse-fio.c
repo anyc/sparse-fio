@@ -98,6 +98,7 @@ struct sparse_fio_transfer {
 
 unsigned char sfio_verbosity = 1;
 unsigned char sfio_no_stdout_print = 0;
+static unsigned char last_line_was_stats = 0;
 #define L_ERR 0
 #define L_INFO 1
 #define L_DBG 2
@@ -115,6 +116,7 @@ static void print(char level, char *format, ...) {
 		
 		vdprintf(fd, format, args);
 	}
+	last_line_was_stats = 0;
 	
 	va_end (args);
 }
@@ -162,18 +164,19 @@ void sfio_print_stats(struct sparse_fio_transfer *transfer) {
 		
 		transfer->bm_prev_timestamp = transfer->bm_timestamp;
 	}
-
-	if (transfer->osize_last_block > 0) {
+	
+	if (transfer->osize_last_block > 0 && last_line_was_stats) {
 		// move cursor up one line, erase line, return cursor to first column
 		print(L_INFO, "\033[A\33[2K\r");
 	}
 	print(L_INFO, "written %5.3f MB ",
-		(float) transfer->written_bytes / 1024 / 1024
+			(float) transfer->written_bytes / 1024 / 1024
 		);
 	print(L_INFO, "%7.3f MB/s time left: %4.1f s\n",
 			transfer->bm_avg_speed / 1024 / 1024,
 			(transfer->total_bytes_to_write - transfer->written_bytes) / transfer->bm_avg_speed
 		);
+	last_line_was_stats = 1;
 	
 	#endif
 }
@@ -443,6 +446,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 	}
 	
+	print(L_DBG, "ifd %d ofd %d (stdin %d stdout %d stderr %d)\n", transfer->ifd, transfer->ofd, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO);
+	
 	// increase required file size if we use our own packed format for the output file
 	if (transfer->write_packed) {
 		transfer->total_bytes_to_write = 
@@ -521,7 +526,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		print(L_INFO,"note: output is not seekable\n");
 	}
 	
-	print(L_INFO,"Transfer size:    %16zu (%6zu MB)\n", transfer->total_bytes_to_write, transfer->total_bytes_to_write / 1024 / 1024);
+	if (transfer->total_bytes_to_write > 0)
+		print(L_INFO,"Transfer size:    %16zu (%6zu MB)\n", transfer->total_bytes_to_write, transfer->total_bytes_to_write / 1024 / 1024);
 	
 	if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// map the input file into memory
@@ -568,7 +574,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 // 		transfer->ooffset += sizeof(hdr);
 	}
 	
-	// if input is in packed format, disable fiemap
+	// if input is in packed format, disable fiemap mode
 	if (fiemap) {
 		unsigned char ibuffer[10];
 		ssize_t bytes_read;
@@ -592,13 +598,15 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 	}
 	
+	unsigned char zero_block[4096];
+	memset(zero_block, 0, sizeof(zero_block));
+	
 	// if we have a fiemap of our input file, we will only read and write the blocks with actual data
 	// if not, we read every block and check ourselves if the block contains only zeros
 	if (fiemap) {
 		int i;
 		struct sparse_fio_v1_block v1_block;
 		
-		// first write table of contents
 		if (transfer->write_packed) {
 			struct sparse_fio_v1_header v1_hdr;
 			
@@ -629,8 +637,6 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 // 					return r;
 // 			}
 		}
-		
-		memset(zeros, 0, sizeof(zeros));
 		
 		// now write actual data blocks
 		for (i=0; i<fiemap->fm_mapped_extents; i++) {
@@ -677,12 +683,17 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						transfer->ooffset += n_zeros;
 						
 						while (n_zeros > 0) {
-							r = write(transfer->ofd, zeros, sizeof(zeros));
-							if (r < sizeof(zeros)) {
+							size_t left;
+							if (n_zeros >= sizeof(zero_block))
+								left = sizeof(zero_block);
+							else
+								left = n_zeros;
+							r = write(transfer->ofd, zero_block, left);
+							if (r < sizeof(zero_block)) {
 								print(L_ERR, "write failed: %s\n", strerror(errno));
 								return -errno;
 							}
-							n_zeros -= sizeof(zeros);
+							n_zeros -= sizeof(zero_block);
 						}
 					}
 					
@@ -700,37 +711,28 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			}
 		}
 	} else {
-		size_t page_size, i, block_size;
-		struct sparse_fio_v1_block v1_block;
+		size_t chunk_size, max_chunk_size, i;
+// 		struct sparse_fio_v1_block v1_block;
 		char *cur_block;
-		char stop;
+		char stop, read_from_hdr_first, one_block_written;
 		ssize_t bytes_read;
 		struct sparse_fio_header hdr;
 		struct sparse_fio_v1_header v1_hdr;
-		struct sparse_fio_v1_block v1_block;
+		struct sparse_fio_v1_block iv1_block, ov1_block;
 		
 		
-		// TODO best value?
-		page_size = sysconf(_SC_PAGE_SIZE * 1024);
-		
-		if (input == 0) {
-			cur_block = malloc(page_size);
-			if (!cur_block) {
-				print(L_ERR, "malloc failed\n");
-				exit(1);
-			}
-		}
-		
+		read_from_hdr_first = 1;
 		bytes_read = read(transfer->ifd, &hdr, sizeof(struct sparse_fio_header));
 		if (bytes_read < 0) {
 			print(L_ERR, "read failed: %s\n", strerror(errno));
 			return -errno;
 		}
 		transfer->ioffset += sizeof(struct sparse_fio_header);
-		if (bytes_read == sizeof(struct sparse_fio_header) && !memcmp(input, "SPARSE_FIO", 10)) {
-			print(L_DBG, "packed input detected (version %u, flags %u)\n", hdr.version, hdr.flags);
+		if (bytes_read == sizeof(struct sparse_fio_header) && !memcmp(hdr.magic, "SPARSE_FIO", 10)) {
+			print(L_DBG, "packed input detected (version %u)\n", hdr.version);
 			
 			transfer->iflags |= SFIO_IS_PACKED;
+			read_from_hdr_first = 0;
 			
 			if (hdr.version != 1) {
 				print(L_ERR, "unsupported version %u\n", hdr.version);
@@ -743,114 +745,293 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				return -errno;
 			}
 			if (bytes_read < sizeof(struct sparse_fio_v1_header)) {
-				print(L_ERR; "invalid packed format\n");
+				print(L_ERR, "invalid packed format\n");
 				return -EINVAL;
 			}
 			transfer->ioffset += sizeof(struct sparse_fio_v1_header);
 			
-			print(L_DBG, "Unpacked size: %zu\n", v1_hdr->unpacked_size);
-// 			print(L_DBG, "#blocks: %zu\n", v1_hdr->n_blocks);
-			
+			print(L_DBG, "Unpacked size:    %16zu (%6zu MB)\n", v1_hdr.unpacked_size, v1_hdr.unpacked_size / 1024 / 1024);
 		}
 		
+		// TODO best value?
+		max_chunk_size = sysconf(_SC_PAGE_SIZE) * 1024;
 		
+		if (input == 0) {
+			cur_block = malloc(max_chunk_size);
+			if (!cur_block) {
+				print(L_ERR, "malloc failed\n");
+				exit(1);
+			}
+		}
+		
+		one_block_written = 0;
 		stop = 0;
 		while (!stop) {
-			block_size = page_size;
 			
 			if ((transfer->iflags & SFIO_IS_PACKED) == 0) {
-				v1_block.start = htole64(transfer->ioffset);
-				
-				if (input) {
-					if (transfer->isize && transfer->ioffset >= transfer->isize)
-						break;
-					
-					if (block_size > transfer->isize - transfer->ioffset)
-						block_size = transfer->isize - transfer->ioffset;
-					
-					cur_block = input + transfer->ioffset;
-				} else {
-					bytes_read = read(transfer->ifd, cur_block, block_size);
-					if (bytes_read < 0) {
-						print(L_ERR, "read failed: %s\n", strerror(errno));
-						return -errno;
-					}
-					
-					if (bytes_read < block_size)
-						stop = 1;
-					
-					block_size = bytes_read;
-				}
-				
-				transfer->ioffset += block_size;
-				
-				// look for first non-zero value, TODO: is strchr or memcmp faster?
-				for (i=0; i < block_size; i++) {
-					if (*((unsigned char *) cur_block + i) != 0)
-						break;
-				}
+				iv1_block.start = transfer->ioffset;
+				iv1_block.size = max_chunk_size;
+				ov1_block.start = transfer->ioffset;
 			} else {
-				bytes_read = read(transfer->ifd, v1_block, sizeof(struct sparse_fio_v1_block));
+				bytes_read = read(transfer->ifd, &ov1_block, sizeof(struct sparse_fio_v1_block));
 				if (bytes_read < 0) {
 					print(L_ERR, "read failed: %s\n", strerror(errno));
 					return -errno;
 				}
 				if (bytes_read < sizeof(struct sparse_fio_v1_block)) {
-					print(L_ERR; "invalid packed format\n");
+					print(L_ERR, "invalid packed format\n");
 					return -EINVAL;
 				}
-// 				htole64
-
-// 				v1_block.start = v1_block.start;
-// 				block_size = v1_block.size;
-				// TODO loop through v1_block.size with block_size
-				i = 0;
+				transfer->ioffset += sizeof(struct sparse_fio_v1_block);
+				
+// 				ov1_block.start = iv1_block.start;
+// 				ov1_block.size = iv1_block.size;
+				
+				iv1_block.start = transfer->ioffset;
+				iv1_block.size = ov1_block.size;
 			}
+			print(L_DBG, "block %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n", iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);print(L_DBG, "\n");
 			
-			if (i < block_size) {
-				// block contains non-zero data
+			if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
+				// avoid the possibility of a negative assignment to iv1_block.size
+				if (transfer->isize <= transfer->ioffset)
+					break;
 				
-				if (transfer->write_packed) {
-					v1_block.size = htole64(block_size);
-					
-					r = write_helper_mmap(transfer, &v1_block, sizeof(v1_block));
-					if (r < 0)
-						return r;
-				}
+				if (transfer->ioffset + iv1_block.size >= transfer->isize)
+					iv1_block.size = transfer->isize - transfer->ioffset;
+			}
+// 			print(L_DBG, "osize %"PRIu64" %"PRIu64" \n", transfer->osize, transfer->ooffset); print(L_DBG, "asd\n");
+			
+			
+			while (!stop) {
+				char only_zeros = 0;
 				
-				if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
-					r = write_helper_mmap(transfer, cur_block, block_size);
-					if (r < 0)
-						return r;
+				chunk_size = max_chunk_size;
+// 				print(L_DBG, "ioff %"PRIu64" %"PRIu64" \n", transfer->ioffset, (iv1_block.size + iv1_block.start));print(L_DBG, "\n");
+				if (transfer->ioffset >= iv1_block.start + iv1_block.size)
+					break;
+				
+				if (chunk_size > (iv1_block.size + iv1_block.start) - transfer->ioffset)
+					chunk_size = (iv1_block.size + iv1_block.start) - transfer->ioffset;
+				
+				if (input) {
+					cur_block = input + transfer->ioffset;
 				} else {
-					r = write_helper_stream(transfer, cur_block, block_size);
-					if (r < 0)
-						return r;
-				}
-			} else {
-				if (transfer->write_packed) {
-				} else {
-					if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
-						transfer->ooffset = lseek(transfer->ofd, block_size, SEEK_CUR);
-						if (transfer->ooffset == sizeof(off_t)-1) {
-							print(L_ERR, "lseek failed: %s\n", strerror(errno));
-							return -errno;
-						}
+					if (read_from_hdr_first) {
+						memcpy(cur_block, &hdr, sizeof(struct sparse_fio_header));
+						bytes_read = sizeof(struct sparse_fio_header);
+						read_from_hdr_first = 0;
 					} else {
-						r = write_helper_stream(transfer, cur_block, block_size);
+						bytes_read = read(transfer->ifd, cur_block, chunk_size);
+					}
+					
+					print(L_DBG, "read %zd %"PRIu64" \n", bytes_read, iv1_block.size);print(L_DBG, "\n");
+					if (bytes_read < 0) {
+						print(L_ERR, "read failed: %s\n", strerror(errno));
+						return -errno;
+					}
+					if (bytes_read == 0) {
+						stop = 1;
+						break;
+					}
+					transfer->ioffset += bytes_read;
+					
+					chunk_size = bytes_read;
+				}
+				ov1_block.size = chunk_size;
+				
+				if (transfer->osize > 0) {
+					// avoid the possibility of a negative assignment to iv1_block.size
+					if (transfer->osize <= transfer->ooffset)
+						break;
+					
+					if (transfer->ooffset + ov1_block.size >= transfer->osize)
+						ov1_block.size = transfer->osize - transfer->ooffset;
+				}
+				
+				i = chunk_size;
+				while (i > 0) {
+					if (i >= sizeof(zero_block))
+						bytes_read = sizeof(zero_block);
+					else
+						bytes_read = i;
+					if (memcmp(cur_block, zero_block, bytes_read))
+						break;
+					i -= bytes_read;
+				}
+				only_zeros = (i == 0);
+				
+// 				print(L_DBG, "chunk %zu %d\n", chunk_size, only_zeros);print(L_DBG, "\n");
+				if (only_zeros) {
+					if (transfer->write_packed) {
+						// we do not write blocks with only zeros in packed mode
+					} else {
+						if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+							// create a gap in the output file
+// 							transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
+// 							if (transfer->ooffset == sizeof(off_t)-1) {
+// 								print(L_ERR, "lseek failed: %s\n", strerror(errno));
+// 								return -errno;
+// 							}
+							r = ftruncate(transfer->ofd, transfer->ooffset + chunk_size);
+							if (r < 0) {
+								print(L_ERR, "ftruncate failed: %s\n", strerror(errno));
+								return r;
+							}
+							transfer->ooffset += chunk_size;
+						} else {
+							// write zeros
+							r = write_helper_stream(transfer, cur_block, chunk_size);
+							if (r < 0)
+								return r;
+						}
+					}
+				} else {
+					one_block_written = 1;
+					
+					if (transfer->write_packed) {
+						print(L_DBG, "write v1 hdr (start %"PRIu64" size %"PRIu64") sizeof %zu\n", ov1_block.start, ov1_block.size, sizeof(ov1_block));
+						if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+							r = write_helper_mmap(transfer, &ov1_block, sizeof(ov1_block));
+							if (r < 0)
+								return r;
+						} else {
+							r = write_helper_stream(transfer, &ov1_block, sizeof(ov1_block));
+							if (r < 0)
+								return r;
+						}
+					}
+					
+					if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+						r = write_helper_mmap(transfer, cur_block, chunk_size);
+						if (r < 0)
+							return r;
+					} else {
+						r = write_helper_stream(transfer, cur_block, chunk_size);
 						if (r < 0)
 							return r;
 					}
 				}
+				
+				transfer->ioffset += chunk_size;
 			}
+// 			print(L_DBG, "stop %d\n", stop);print(L_DBG, "\n");
+// 			if (transfer->write_packed) {
+// 				r = write_helper_mmap(transfer, &ov1_block, sizeof(v1_block));
+// 				if (r < 0)
+// 					return r;
+// 			}
 		}
+		
+		if (one_block_written == 0) {
+			print(L_DBG, "no non-zero bytes found\n");
+			ov1_block.start = transfer->ioffset;
+			ov1_block.size = 0;
+			r = write_helper_stream(transfer, &ov1_block, sizeof(ov1_block));
+			if (r < 0)
+				return r;
+		}
+		
+		
+// 		stop = 0;
+// 		while (!stop) {
+// 			block_size = chunk_size;
+// 			
+// 			if ((transfer->iflags & SFIO_IS_PACKED) == 0) {
+// 				v1_block.start = htole64(transfer->ioffset);
+// 				
+// 				if (input) {
+// 					if (transfer->isize && transfer->ioffset >= transfer->isize)
+// 						break;
+// 					
+// 					if (block_size > transfer->isize - transfer->ioffset)
+// 						block_size = transfer->isize - transfer->ioffset;
+// 					
+// 					cur_block = input + transfer->ioffset;
+// 				} else {
+// 					bytes_read = read(transfer->ifd, cur_block, block_size);
+// 					if (bytes_read < 0) {
+// 						print(L_ERR, "read failed: %s\n", strerror(errno));
+// 						return -errno;
+// 					}
+// 					
+// 					if (bytes_read < block_size)
+// 						stop = 1;
+// 					
+// 					block_size = bytes_read;
+// 				}
+// 				
+// 				transfer->ioffset += block_size;
+// 				
+// 				// look for first non-zero value, TODO: is strchr or memcmp faster?
+// 				for (i=0; i < block_size; i++) {
+// 					if (*((unsigned char *) cur_block + i) != 0)
+// 						break;
+// 				}
+// 			} else {
+// 				bytes_read = read(transfer->ifd, v1_block, sizeof(struct sparse_fio_v1_block));
+// 				if (bytes_read < 0) {
+// 					print(L_ERR, "read failed: %s\n", strerror(errno));
+// 					return -errno;
+// 				}
+// 				if (bytes_read < sizeof(struct sparse_fio_v1_block)) {
+// 					print(L_ERR; "invalid packed format\n");
+// 					return -EINVAL;
+// 				}
+// // 				htole64
+// 
+// // 				v1_block.start = v1_block.start;
+// // 				block_size = v1_block.size;
+// 				// TODO loop through v1_block.size with block_size
+// 				i = 0;
+// 			}
+// 			
+// 			if (i < block_size) {
+// 				// block contains non-zero data
+// 				
+// 				if (transfer->write_packed) {
+// 					v1_block.size = htole64(block_size);
+// 					
+// 					r = write_helper_mmap(transfer, &v1_block, sizeof(v1_block));
+// 					if (r < 0)
+// 						return r;
+// 				}
+// 				
+// 				if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+// 					r = write_helper_mmap(transfer, cur_block, block_size);
+// 					if (r < 0)
+// 						return r;
+// 				} else {
+// 					r = write_helper_stream(transfer, cur_block, block_size);
+// 					if (r < 0)
+// 						return r;
+// 				}
+// 			} else {
+// 				// block contains only zeros
+// 				
+// 				if (transfer->write_packed) {
+// 				} else {
+// 					if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+// 						transfer->ooffset = lseek(transfer->ofd, block_size, SEEK_CUR);
+// 						if (transfer->ooffset == sizeof(off_t)-1) {
+// 							print(L_ERR, "lseek failed: %s\n", strerror(errno));
+// 							return -errno;
+// 						}
+// 					} else {
+// 						r = write_helper_stream(transfer, cur_block, block_size);
+// 						if (r < 0)
+// 							return r;
+// 					}
+// 				}
+// 			}
+// 		}
 	}
 	
 	if (input)
 		munmap(input, transfer->isize);
 	
 	// fsync() will block until all data is written to the disk
-	if (!transfer->no_fsync) {
+	if (!transfer->no_fsync && (transfer->oflags & SFIO_IS_STREAM) == 0) {
 		r = fsync(transfer->ofd);
 		if (r < 0) {
 			print(L_ERR, "fsync failed: %s\n", strerror(errno));
@@ -951,5 +1132,9 @@ int main(int argc, char **argv) {
 		sfio_no_stdout_print = 1;
 	}
 	
-	sfio_transfer(&transfer);
+	c = sfio_transfer(&transfer);
+	if (c < 0)
+		return c;
+	print(L_DBG, "asd\n");
+	print(L_ERR, "asd\n");
 }
