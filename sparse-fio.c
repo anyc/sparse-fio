@@ -90,7 +90,7 @@ struct sparse_fio_transfer {
 	int iflags;
 	int oflags;
 	
-	char no_fsync, write_packed, overwrite_output;
+	char no_fsync, overwrite_output;
 	char discard;
 	
 	#ifndef NO_BENCHMARK
@@ -517,7 +517,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	
 	if (transfer->isize_nonzero > 0 || (transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// increase required file size if we use our own packed format for the output file
-		if (transfer->write_packed) {
+		if (transfer->oflags & SFIO_IS_PACKED) {
 			transfer->bytes_to_write =
 				transfer->isize_nonzero +
 				sizeof(struct sparse_fio_header) + sizeof(struct sparse_fio_v1_header) + sizeof(struct sparse_fio_v1_block);
@@ -627,7 +627,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	#endif
 	
 	// write the header of our packed format
-	if (transfer->write_packed) {
+	if (transfer->oflags & SFIO_IS_PACKED) {
 		struct sparse_fio_header hdr;
 		
 		print(L_DBG, "will write in packed format\n");
@@ -663,7 +663,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 	}
 	
-	if (transfer->write_packed) {
+	if (transfer->oflags & SFIO_IS_PACKED) {
 		transfer->osize = transfer->bytes_to_write;
 	} else {
 		transfer->osize = transfer->isize;
@@ -679,7 +679,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		struct sparse_fio_v1_block v1_block;
 		
 		
-		if (transfer->write_packed) {
+		if (transfer->oflags & SFIO_IS_PACKED) {
 			struct sparse_fio_v1_header v1_hdr;
 			
 // 			v1_hdr.n_blocks = htole64(fiemap->fm_mapped_extents);
@@ -724,7 +724,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				ex_length = transfer->isize - ex_start;
 			
 			if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
-				if (transfer->write_packed) {
+				if (transfer->oflags & SFIO_IS_PACKED) {
 					v1_block.start = htole64(sizeof(struct sparse_fio_header) +
 						sizeof(struct sparse_fio_v1_block) * fiemap->fm_mapped_extents +
 						ex_start);
@@ -744,7 +744,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				
 				write_helper_mmap(transfer, input + ex_start, ex_length);
 			} else {
-				if (transfer->write_packed) {
+				if (transfer->oflags & SFIO_IS_PACKED) {
 					v1_block.start = htole64(sizeof(struct sparse_fio_header) +
 						sizeof(struct sparse_fio_v1_block) * fiemap->fm_mapped_extents +
 						ex_start);
@@ -810,7 +810,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		if (transfer->ooffset < transfer->osize) {
 			print(L_DBG, "handle trailing zeros\n");
 			
-			if (transfer->write_packed) {
+			if (transfer->oflags & SFIO_IS_PACKED) {
 				struct sparse_fio_v1_block ov1_block;
 				
 				ov1_block.start = transfer->ioffset;
@@ -900,7 +900,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			}
 		}
 		
-		if (transfer->write_packed) {
+		if (transfer->oflags & SFIO_IS_PACKED) {
 			struct sparse_fio_v1_header v1_hdr;
 			
 			v1_hdr.flags = 0;
@@ -1060,7 +1060,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				
 // 				print(L_DBG, "chunk %zu %d\n", chunk_size, only_zeros);print(L_DBG, "\n");
 				if (only_zeros) {
-					if (transfer->write_packed) {
+					if (transfer->oflags & SFIO_IS_PACKED) {
 						// we do not write blocks with only zeros in packed mode
 						last_block_empty = 1;
 					} else {
@@ -1092,7 +1092,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				} else {
 // 					one_block_written = 1;
 					
-					if (transfer->write_packed) {
+					if (transfer->oflags & SFIO_IS_PACKED) {
 						print(L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
 						print(L_DBG, "write v1 block (start %"PRIu64" size %"PRIu64") sizeof %zu\n", ov1_block.start, ov1_block.size, sizeof(ov1_block));
 						
@@ -1131,11 +1131,11 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 // 		fprintf(stderr, "%zu %zu\n", transfer->ooffset, transfer->osize);
 // 		if (transfer->ooffset < transfer->osize) {
-		if (transfer->write_packed && last_block_empty) {
+		if ((transfer->oflags & SFIO_IS_PACKED) && last_block_empty) {
 // 			print(L_DBG, "no non-zero bytes found, write empty v1 block (%zu)\n", sizeof(ov1_block));
 			print(L_DBG, "handle trailing zeros\n");
 			
-			if (transfer->write_packed) {
+			if (transfer->oflags & SFIO_IS_PACKED) {
 				ov1_block.start = transfer->ioffset;
 				ov1_block.size = 0;
 				
@@ -1214,7 +1214,7 @@ int main(int argc, char **argv) {
 				transfer.no_fsync = 1;
 				break;
 			case 'p':
-				transfer.write_packed = 1;
+				transfer.oflags |= SFIO_IS_PACKED;
 				break;
 			case 'P':
 				parse_llong(optarg, &llopt);
@@ -1270,8 +1270,7 @@ int main(int argc, char **argv) {
 		// output is stdout
 		
 		transfer.ofd = STDOUT_FILENO;
-		transfer.oflags = SFIO_IS_STREAM;
-		transfer.write_packed = 1;
+		transfer.oflags = SFIO_IS_STREAM | SFIO_IS_PACKED;
 		
 		sfio_no_stdout_print = 1;
 	}
