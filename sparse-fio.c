@@ -1079,8 +1079,39 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	return 0;
 }
 
+void print_help(int level) {
+	print(level, "Usage: sparse-fio [args] [<inputfile> <outputfile>]\n");
+	print(level, "\n");
+	print(level, "sparse-fio will copy data from the input to the output file.\n");
+	print(level, "If the input file is already sparse, it will only copy the non-zero\n");
+	print(level, "blocks. If the input file is not sparse, sparse-fio will read the complete\n");
+	print(level, "file and create a sparse output file.\n");
+	print(level, "\n");
+	print(level, "If no input or no output file is specified, sparse-fio will read from stdin\n");
+	print(level, "or write to stdout, respectively. If sparse-fio writes to stdout, the data\n");
+	print(level, "will be written in so-called packed format. As zero holes cannot be signaled\n");
+	print(level, "through pipes or similar, sparse-fio uses an own in-band protocol to notify the\n");
+	print(level, "other side about holes in order to avoid transferring blocks of zeros.\n");
+	print(level, "This way, images can be transferred efficiently over the network, for example.\n");
+	print(level, "\n");
+	print(level, "If the output file is actually a block device, sparse-fio will issue a BLKDISCARD\n");
+	print(level, "ioctl that instructs the disk controller to quickly forget ALL the previously\n");
+	print(level, "stored data. This is useful for SSD or SD cards where an internal controller\n");
+	print(level, "keeps track of used blocks for wear leveling. Sending a BLKDISCARD avoids\n");
+	print(level, "explicitly erasing or overwriting the old data.\n");
+	print(level, "\n");
+	print(level, "Optional arguments:\n");
+	print(level, " -D              do NOT discard ALL data on target device before writing\n");
+	print(level, " -f              force (overwrite existing file)\n");
+	print(level, " -F              do not wait for completion using fsync()\n");
+	print(level, " -i <inputfile>  \n");
+	print(level, " -o <outputfile> \n");
+	print(level, " -p <0|1|2>      write in packed format: 0=off, 1=on, 2=auto (default)\n");
+	print(level, " -P <0|1|2>      control stats output: 0=off, 1=on, 2=auto (default)\n");
+}
+
 int main(int argc, char **argv) {
-	int c;
+	int c, packed_setting;
 	struct sparse_fio_transfer transfer;
 	long long llopt;
 	
@@ -1091,18 +1122,20 @@ int main(int argc, char **argv) {
 	transfer.ofd = -1;
 	transfer.discard = 1;
 	transfer.print_stats = 2;
+	packed_setting = 2;
 	
-	while ((c = getopt(argc, argv, "hDFpfi:o:P:")) != -1) {
+	while ((c = getopt(argc, argv, "hDFfi:o:p:P:")) != -1) {
 		switch (c) {
 			case 'F':
 				transfer.no_fsync = 1;
 				break;
 			case 'p':
-				transfer.oflags |= SFIO_IS_PACKED;
+				parse_llong(optarg, &llopt);
+				transfer.print_stats = (int) llopt;
 				break;
 			case 'P':
 				parse_llong(optarg, &llopt);
-				transfer.print_stats = (int) llopt;
+				packed_setting = (int) llopt;
 				break;
 			case 'D':
 				transfer.discard = 0;
@@ -1118,16 +1151,7 @@ int main(int argc, char **argv) {
 				break;
 			case 'h':
 			default:
-				print(L_ERR, "Usage: %s [args] [<inputfile> <outputfile>]\n", argv[0]);
-				print(L_ERR, "\n");
-				print(L_ERR, "Optional arguments:\n");
-				print(L_ERR, " -D              do not discard data on target device before writing\n");
-				print(L_ERR, " -f              force (overwrite existing file)\n");
-				print(L_ERR, " -F              do not wait for completion using fsync\n");
-				print(L_ERR, " -i <inputfile>  \n");
-				print(L_ERR, " -o <outputfile> \n");
-				print(L_ERR, " -p              write output in packed SFIO format\n");
-				print(L_ERR, " -P <0|1|2>      control stats output: 0=off, 1=on, 2=auto (default)\n");
+				print_help(L_ERR);
 				return 1;
 		}
 	}
@@ -1157,6 +1181,16 @@ int main(int argc, char **argv) {
 		transfer.oflags = SFIO_IS_STREAM | SFIO_IS_PACKED;
 		
 		sfio_no_stdout_print = 1;
+	}
+	
+	switch (packed_setting) {
+		case 0: transfer.oflags = transfer.oflags & (~SFIO_IS_PACKED); break;
+		case 1: transfer.oflags = transfer.oflags | SFIO_IS_PACKED; break;
+		case 2: break;
+		default:
+			print(L_ERR, "invalid value for -p: %d\n", packed_setting);
+			print_help(L_ERR);
+			return 1;
 	}
 	
 	c = sfio_transfer(&transfer);
