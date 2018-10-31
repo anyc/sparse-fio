@@ -88,6 +88,7 @@ struct sparse_fio_transfer {
 	int iflags;
 	int oflags;
 	
+	char ask;
 	char no_fsync, overwrite_output;
 	char discard;
 	
@@ -401,7 +402,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			return 0;
 		}
 		
-		print(L_INFO, "Input size:     %16zu (%6zu MB)\n", transfer->isize, transfer->isize / 1024 / 1024);
+		print(L_INFO, "Input size:        %16zu (%6zu MB)\n", transfer->isize, transfer->isize / 1024 / 1024);
 		
 		// check if we can get a fiemap for the input file (fiemap contains information
 		// about sparse/zero blocks in the file)
@@ -466,7 +467,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				if (transfer->isize_nonzero > transfer->isize)
 					transfer->isize_nonzero = transfer->isize;
 				
-				print(L_INFO, "Non-zero bytes: %16zu (%6zu MB) (approx.)\n", transfer->isize_nonzero, transfer->isize_nonzero / 1024 / 1024);
+				print(L_INFO, "Non-zero bytes:    %16zu (%6zu MB) (approx.)\n", transfer->isize_nonzero, transfer->isize_nonzero / 1024 / 1024);
 			}
 		} else {
 			transfer->isize_nonzero = transfer->isize;
@@ -549,7 +550,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			transfer->osize_max = dev_size;
 			transfer->oflags |= SFIO_IS_BLOCKDEV;
 			
-			print(L_INFO,"Block device size:    %16zu (%6zu MB)\n", transfer->osize_max, transfer->osize_max / 1024 / 1024);
+			print(L_INFO, "Block device size: %16zu (%6zu MB)\n", transfer->osize_max, transfer->osize_max / 1024 / 1024);
 			
 			if (transfer->osize_max < transfer->bytes_to_write) {
 				print(L_ERR, "error, device size is too small (%zu < %zu)\n", transfer->osize_max, transfer->bytes_to_write);
@@ -587,7 +588,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	}
 	
 	if (transfer->bytes_to_write > 0)
-		print(L_INFO, "Transfer size:    %16zu (%6zu MB)\n", transfer->bytes_to_write, transfer->bytes_to_write / 1024 / 1024);
+		print(L_INFO, "Transfer size:     %16zu (%6zu MB)\n", transfer->bytes_to_write, transfer->bytes_to_write / 1024 / 1024);
 	
 	if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// map the input file into memory
@@ -600,6 +601,20 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		input = 0;
 	}
 	
+	if (transfer->ask) {
+		int input;
+		
+		printf("Start? ([y]/n)\n");
+		input = getchar();
+		if (input == 'y') {
+			input = getchar();
+			if (input != '\n')
+				return 0;
+		} else {
+			if (input != '\n')
+				return 0;
+		}
+	}
 	
 	transfer->written_bytes = 0;
 	transfer->ooffset = 0;
@@ -950,24 +965,25 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						ov1_block.size = transfer->osize - transfer->ooffset;
 				}
 				
-				i = chunk_size;
-				while (i > 0) {
-					if (i >= sizeof(zero_block))
+				i = 0;
+				while (i < chunk_size) {
+					if (i + sizeof(zero_block) <= chunk_size)
 						bytes_read = sizeof(zero_block);
 					else
-						bytes_read = i;
-					if (memcmp(cur_block, zero_block, bytes_read))
+						bytes_read = chunk_size - i;
+					
+					if (memcmp(&cur_block[i], zero_block, bytes_read))
 						break;
-					i -= bytes_read;
+					i += bytes_read;
 				}
-				only_zeros = (i == 0);
+				only_zeros = (i == chunk_size);
 				
 				if (only_zeros) {
 					if (transfer->oflags & SFIO_IS_PACKED) {
 						// we do not write blocks with only zeros in packed mode
 						last_block_empty = 1;
 					} else {
-						print(L_DBG, "will create %zu zeros\n", chunk_size);
+						print(L_DBG, "will create gap with %zu bytes\n", chunk_size);
 						
 						if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
 							// create a gap in the output file
@@ -977,13 +993,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 									print(L_ERR, "ftruncate failed: %s\n", strerror(errno));
 									return r;
 								}
-								transfer->ooffset += chunk_size;
-							} else {
-								transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
-								if (transfer->ooffset == sizeof(off_t)-1) {
-									print(L_ERR, "lseek failed: %s\n", strerror(errno));
-									return -errno;
-								}
+							}
+							
+							transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
+							if (transfer->ooffset == sizeof(off_t)-1) {
+								print(L_ERR, "lseek failed: %s\n", strerror(errno));
+								return -errno;
 							}
 						} else {
 							// write zeros
@@ -1101,6 +1116,7 @@ void print_help(int level) {
 	print(level, "explicitly erasing or overwriting the old data.\n");
 	print(level, "\n");
 	print(level, "Optional arguments:\n");
+	print(level, " -a              ask before start writing\n");
 	print(level, " -D              do NOT discard ALL data on target device before writing\n");
 	print(level, " -f              force (overwrite existing file)\n");
 	print(level, " -F              do not wait for completion using fsync()\n");
@@ -1124,8 +1140,11 @@ int main(int argc, char **argv) {
 	transfer.print_stats = 2;
 	packed_setting = 2;
 	
-	while ((c = getopt(argc, argv, "hDFfi:o:p:P:")) != -1) {
+	while ((c = getopt(argc, argv, "haDFfi:o:p:P:")) != -1) {
 		switch (c) {
+			case 'a':
+				transfer.ask = 1;
+				break;
 			case 'F':
 				transfer.no_fsync = 1;
 				break;
