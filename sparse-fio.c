@@ -29,6 +29,11 @@
 #include <linux/fs.h>
 #include <linux/fiemap.h>
 
+#ifdef WITH_UTIL_LINUX
+#include <blkid/blkid.h>
+#include <libmount/libmount.h>
+#endif
+
 #ifndef NO_BENCHMARK
 #include <time.h>
 
@@ -89,7 +94,7 @@ struct sparse_fio_transfer {
 	int oflags;
 	
 	char ask;
-	char no_fsync, overwrite_output;
+	char no_fsync, ignore_warnings;
 	char discard;
 	
 	#ifndef NO_BENCHMARK
@@ -102,11 +107,14 @@ struct sparse_fio_transfer {
 	#endif
 };
 
-unsigned char sfio_verbosity = 1;
-unsigned char sfio_no_stdout_print = 0;
 #define L_ERR 0
-#define L_INFO 1
-#define L_DBG 2
+#define L_WARN 1
+#define L_INFO 2
+#define L_DBG 3
+unsigned char sfio_verbosity = L_INFO;
+unsigned char sfio_no_stdout_print = 0;
+unsigned char sfio_no_color_print = 0;
+
 static void print(char level, char *format, ...) {
 	va_list args;
 	int fd;
@@ -120,9 +128,16 @@ static void print(char level, char *format, ...) {
 		else
 			fd = STDOUT_FILENO;
 		
+		if (level <= L_WARN && !sfio_no_color_print)
+			dprintf(fd, "\x1b[31m");
+		
 		if (getenv("SFIO_PID_OUTPUT"))
 			dprintf(fd, "%d: ", getpid());
+		
 		vdprintf(fd, format, args);
+		
+		if (level <= L_WARN && !sfio_no_color_print)
+			dprintf(fd, "\x1b[0m");
 	}
 	
 	va_end (args);
@@ -345,6 +360,153 @@ int sfio_init() {
 	return 0;
 }
 
+#ifdef WITH_UTIL_LINUX
+#define DEV_CHECK_WARN -2
+#define DEV_CHECK_QUERY_FAILED -1
+#define DEV_CHECK_OK 0
+int show_and_check_device_info(char *filepath) {
+	int r, err, i, nparts;
+	size_t size;
+	blkid_probe probe;
+	blkid_partlist partlist;
+	blkid_parttable root_tab;
+	char buf[128], disk_name[128];
+	dev_t disk_number;
+	struct libmnt_table *mtab;
+	
+	
+	err = DEV_CHECK_OK;
+	mtab = 0;
+	
+	probe = blkid_new_probe_from_filename(filepath);
+	if (!probe) {
+		print(L_ERR, "failed to create new blkid probe from \"%s\" (%d)\n", filepath, errno);
+		err = DEV_CHECK_QUERY_FAILED;
+		goto done;
+	}
+	
+	if (!blkid_probe_is_wholedisk(probe)) {
+		print(L_WARN, "warning: %s is not a disk\n", filepath);
+		err = DEV_CHECK_WARN;
+		goto done;
+	}
+	
+	r = blkid_devno_to_wholedisk(blkid_probe_get_devno(probe), disk_name, sizeof(disk_name), &disk_number);
+	if (r) {
+		print(L_ERR, "blkid_devno_to_wholedisk failed for \"%s\"\n", filepath);
+	} else {
+		FILE *f;
+		
+		snprintf(buf, 64, "/sys/block/%s/device/model", disk_name);
+		f = fopen(buf, "r");
+		if (!f) {
+			print(L_ERR, "opening \"%s\" failed: %s\n", filepath, strerror(errno));
+		} else {
+			size = fread(buf, 1, sizeof(buf), f);
+			if (size > 0)
+				size -= 1;
+			buf[size] = 0;
+			
+			print(L_INFO, "Disk model:          %16s\n", buf);
+			
+			fclose(f);
+		}
+	}
+	
+	partlist = blkid_probe_get_partitions(probe);
+	if (!partlist) {
+		print(L_ERR, "failed to read partitions from \"%s\" (%d)\n", filepath, errno);
+		err = DEV_CHECK_QUERY_FAILED;
+		goto done;
+	}
+	
+	root_tab = blkid_partlist_get_table(partlist);
+	if (!root_tab) {
+		print(L_ERR, "unknown partition table on \"%s\"\n", filepath);
+		err = DEV_CHECK_QUERY_FAILED;
+		goto done;
+	}
+	
+	print(L_INFO, "Disk Id:           %16s\n", blkid_parttable_get_id(root_tab));
+	
+	nparts = blkid_partlist_numof_partitions(partlist);
+	if (!nparts) {
+		print(L_ERR, "could not get partitions on \"%s\"\n", filepath);
+		err = DEV_CHECK_QUERY_FAILED;
+		goto done;
+	}
+	
+	
+	#ifdef LIBMOUNT_DEBUG
+	mnt_init_debug(0xffff);
+	#endif
+	
+	mtab = mnt_new_table();
+	
+	r = mnt_table_parse_mtab(mtab, 0);
+	if (r) {
+		print(L_ERR, "could not parse mtab\n");
+		err = DEV_CHECK_QUERY_FAILED;
+		mtab = 0;
+	}
+	
+	print(L_INFO, "Partitions:\n");
+	
+	for (i = 0; i < nparts; i++) {
+		const char *p;
+		blkid_partition par;
+		blkid_parttable tab;
+		struct libmnt_fs *fs;
+		
+		
+		par = blkid_partlist_get_partition(partlist, i);
+		tab = blkid_partition_get_table(par);
+		
+		snprintf(buf, sizeof(buf), "%s%u", blkid_devno_to_devname(disk_number), blkid_partition_get_partno(par));
+		
+		print(L_INFO, "\t%s: %10llu %10llu  0x%02x",
+				buf,
+				(unsigned long long) blkid_partition_get_start(par),
+				(unsigned long long) blkid_partition_get_size(par),
+				blkid_partition_get_type(par)
+			);
+		
+		if (root_tab != tab)
+			/* subpartition (BSD, Minix, ...) */
+			print(L_INFO, " (%s)", blkid_parttable_get_type(tab));
+		
+		p = blkid_partition_get_name(par);
+		if (p)
+			print(L_INFO, " name='%s'", p);
+		p = blkid_partition_get_uuid(par);
+		if (p)
+			print(L_INFO, " uuid='%s'", p);
+		p = blkid_partition_get_type_string(par);
+		if (p)
+			print(L_INFO, " type='%s'", p);
+		
+		print(L_INFO, "\n");
+		
+		if (mtab) {
+			fs = mnt_table_find_source(mtab, buf, MNT_ITER_FORWARD);
+			if (fs) {
+				print(L_WARN, "warning: %s is mounted\n", buf);
+				err = DEV_CHECK_WARN;
+			}
+		}
+	}
+	
+done:
+	if (mtab)
+		mnt_free_table(mtab);
+	
+	if (probe)
+		blkid_free_probe(probe);
+	
+	return err;
+}
+#endif
+
 int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	struct fiemap *fiemap;
 	void *input;
@@ -372,7 +534,6 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
 		char try_fiemap;
 		size_t fiemap_size;
-		
 		
 		if (fstat(transfer->ifd, &stat) == -1) {
 			print(L_ERR, "fstat for \"%s\" failed: %s\n", transfer->ifilepath, strerror(errno));
@@ -472,6 +633,21 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		} else {
 			transfer->isize_nonzero = transfer->isize;
 		}
+		
+		#ifdef WITH_UTIL_LINUX
+		if (transfer->iflags & SFIO_IS_BLOCKDEV) {
+			r = show_and_check_device_info(transfer->ifilepath);
+			switch (r) {
+				case DEV_CHECK_WARN:
+				case DEV_CHECK_QUERY_FAILED:
+					if (!transfer->ignore_warnings)
+						transfer->ask = 1;
+					break;
+				case DEV_CHECK_OK:
+					break;
+			}
+		}
+		#endif
 	} else {
 		fiemap = 0;
 		
@@ -480,6 +656,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			transfer->isize_nonzero = transfer->isize;
 	}
 	
+	print(L_INFO, "\n");
 	
 	/*
 	 * open output file
@@ -550,29 +727,34 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			transfer->osize_max = dev_size;
 			transfer->oflags |= SFIO_IS_BLOCKDEV;
 			
-			print(L_INFO, "Block device size: %16zu (%6zu MB)\n", transfer->osize_max, transfer->osize_max / 1024 / 1024);
+			print(L_INFO, "Output device size:%16zu (%6zu MB)\n", transfer->osize_max, transfer->osize_max / 1024 / 1024);
 			
 			if (transfer->osize_max < transfer->bytes_to_write) {
 				print(L_ERR, "error, device size is too small (%zu < %zu)\n", transfer->osize_max, transfer->bytes_to_write);
 				return -EINVAL;
 			}
 			
-			// issue a discard command that tells the device controller to forget about
-			// previously stored data
-			if (transfer->discard) {
-				uint64_t range[2];
-				
-				range[0] = 0;
-				range[1] = transfer->osize_max;
-				
-				r = ioctl(transfer->ofd, BLKDISCARD, &range);
-				if (r < 0)
-					print(L_INFO, "optional BLKDISCARD ioctl failed: %s\n", strerror(errno));
+			#ifdef WITH_UTIL_LINUX
+			if (transfer->oflags & SFIO_IS_BLOCKDEV) {
+				r = show_and_check_device_info(transfer->ofilepath);
+				switch (r) {
+					case DEV_CHECK_WARN:
+					case DEV_CHECK_QUERY_FAILED:
+						if (!transfer->ignore_warnings)
+							transfer->ask = 1;
+						break;
+					case DEV_CHECK_OK:
+						break;
+				}
 			}
+			#endif
 		} else {
-			if (output_exists && !transfer->overwrite_output) {
-				print(L_ERR, "will not overwrite output file, use -f to overwrite the file\n");
-				return -EEXIST;
+			if (output_exists) {
+				print(L_WARN, "warning: %s already exists, will overwrite file\n", transfer->ofilepath);
+				
+				if (!transfer->ignore_warnings) {
+					transfer->ask = 1;
+				}
 			}
 			
 			// TODO test if free space is large enough?
@@ -588,7 +770,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	}
 	
 	if (transfer->bytes_to_write > 0)
-		print(L_INFO, "Transfer size:     %16zu (%6zu MB)\n", transfer->bytes_to_write, transfer->bytes_to_write / 1024 / 1024);
+		print(L_INFO, "\nTransfer size:     %16zu (%6zu MB)\n", transfer->bytes_to_write, transfer->bytes_to_write / 1024 / 1024);
 	
 	if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// map the input file into memory
@@ -604,7 +786,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	if (transfer->ask) {
 		int input;
 		
-		printf("Start? ([y]/n)\n");
+		printf("\nStart? ([y]/n)\n");
 		input = getchar();
 		if (input == 'y') {
 			input = getchar();
@@ -625,6 +807,21 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	
 	clock_gettime(CLOCK_MONOTONIC, &time_start);
 	#endif
+	
+	if (transfer->oflags & SFIO_IS_BLOCKDEV) {
+		// issue a discard command that tells the device controller to forget about
+		// previously stored data
+		if (transfer->discard) {
+			uint64_t range[2];
+			
+			range[0] = 0;
+			range[1] = transfer->osize_max;
+			
+			r = ioctl(transfer->ofd, BLKDISCARD, &range);
+			if (r < 0)
+				print(L_INFO, "optional BLKDISCARD ioctl failed: %s\n", strerror(errno));
+		}
+	}
 	
 	// write the header of our packed format
 	if (transfer->oflags & SFIO_IS_PACKED) {
@@ -1117,13 +1314,16 @@ void print_help(int level) {
 	print(level, "\n");
 	print(level, "Optional arguments:\n");
 	print(level, " -a              ask before start writing\n");
+	print(level, " -C              disable colored console output\n");
 	print(level, " -D              do NOT discard ALL data on target device before writing\n");
-	print(level, " -f              force (overwrite existing file)\n");
+	print(level, " -f              force (ignore warnings)\n");
 	print(level, " -F              do not wait for completion using fsync()\n");
 	print(level, " -i <inputfile>  \n");
 	print(level, " -o <outputfile> \n");
 	print(level, " -p <0|1|2>      write in packed format: 0=off, 1=on, 2=auto (default)\n");
+	#ifndef NO_BENCHMARK
 	print(level, " -P <0|1|2>      control stats output: 0=off, 1=on, 2=auto (default)\n");
+	#endif
 }
 
 int main(int argc, char **argv) {
@@ -1137,30 +1337,37 @@ int main(int argc, char **argv) {
 	transfer.ifd = -1;
 	transfer.ofd = -1;
 	transfer.discard = 1;
+	#ifndef NO_BENCHMARK
 	transfer.print_stats = 2;
+	#endif
 	packed_setting = 2;
 	
-	while ((c = getopt(argc, argv, "haDFfi:o:p:P:")) != -1) {
+	while ((c = getopt(argc, argv, "haCDFfi:o:p:P:")) != -1) {
 		switch (c) {
 			case 'a':
 				transfer.ask = 1;
+				break;
+			case 'C':
+				sfio_no_color_print = 1;
+				break;
+			case 'f':
+				transfer.ignore_warnings = 1;
 				break;
 			case 'F':
 				transfer.no_fsync = 1;
 				break;
 			case 'p':
 				parse_llong(optarg, &llopt);
-				transfer.print_stats = (int) llopt;
+				packed_setting = (int) llopt;
 				break;
 			case 'P':
+				#ifndef NO_BENCHMARK
 				parse_llong(optarg, &llopt);
-				packed_setting = (int) llopt;
+				transfer.print_stats = (int) llopt;
+				#endif
 				break;
 			case 'D':
 				transfer.discard = 0;
-				break;
-			case 'f':
-				transfer.overwrite_output = 1;
 				break;
 			case 'i':
 				transfer.ifilepath = optarg;
@@ -1169,6 +1376,8 @@ int main(int argc, char **argv) {
 				transfer.ofilepath = optarg;
 				break;
 			case 'h':
+				print_help(L_INFO);
+				return 1;
 			default:
 				print_help(L_ERR);
 				return 1;
