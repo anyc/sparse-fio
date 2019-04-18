@@ -41,81 +41,15 @@
 #define SPEED_SLOTS 10
 #endif
 
-// header struct of a single block
-struct sparse_fio_v1_block {
-	uint64_t start;
-	uint64_t size;
-} __attribute__((__packed__));
+#include "sparse-fio.h"
 
-// version-specific header struct 
-struct sparse_fio_v1_header {
-	uint8_t flags;
-	uint64_t unpacked_size;
-	uint64_t nonzero_size;
-	
-	struct sparse_fio_v1_block blocks[0];
-} __attribute__((__packed__));
+#ifndef BUILD_APP_ONLY
 
-// header struct of the own sfio file format
-struct sparse_fio_header {
-	uint8_t magic[10];
-	uint8_t version;
-} __attribute__((__packed__));
-
-#define SFIO_IS_STREAM   1<<0
-#define SFIO_IS_PACKED   1<<1
-#define SFIO_IS_BLOCKDEV 1<<2
-
-struct sparse_fio_transfer {
-	char *ifilepath;
-	char *ofilepath;
-	
-	int ifd;
-	int ofd;
-	
-	off_t ioffset;
-	off_t ooffset;
-	
-	off_t ooffset_last_block;
-	size_t osize_last_block;
-	
-	size_t written_bytes;
-	
-	size_t isize;
-	size_t isize_unpacked;
-	size_t isize_nonzero;
-	
-	size_t bytes_to_write;
-	
-	size_t osize;
-	size_t osize_max;
-	
-	int iflags;
-	int oflags;
-	
-	char ask;
-	char no_fsync, ignore_warnings;
-	char discard;
-	
-	#ifndef NO_BENCHMARK
-	char print_stats;
-	size_t bm_written_in_slot;
-	struct timespec bm_timestamp, bm_prev_timestamp;
-	float bm_speed[SPEED_SLOTS];
-	unsigned int bm_cur_slot;
-	float bm_avg_speed;
-	#endif
-};
-
-#define L_ERR 0
-#define L_WARN 1
-#define L_INFO 2
-#define L_DBG 3
-unsigned char sfio_verbosity = L_INFO;
+unsigned char sfio_verbosity = SFIO_L_INFO;
 unsigned char sfio_no_stdout_print = 0;
 unsigned char sfio_no_color_print = 0;
 
-static void print(char level, char *format, ...) {
+void sfio_print(char level, char *format, ...) {
 	va_list args;
 	int fd;
 	
@@ -123,12 +57,12 @@ static void print(char level, char *format, ...) {
 	va_start (args, format);
 	
 	if (level <= sfio_verbosity) {
-		if (level == L_ERR || sfio_no_stdout_print)
+		if (level == SFIO_L_ERR || sfio_no_stdout_print)
 			fd = STDERR_FILENO;
 		else
 			fd = STDOUT_FILENO;
 		
-		if (level <= L_WARN && !sfio_no_color_print)
+		if (level <= SFIO_L_WARN && !sfio_no_color_print)
 			dprintf(fd, "\x1b[31m");
 		
 		if (getenv("SFIO_PID_OUTPUT"))
@@ -136,11 +70,43 @@ static void print(char level, char *format, ...) {
 		
 		vdprintf(fd, format, args);
 		
-		if (level <= L_WARN && !sfio_no_color_print)
+		if (level <= SFIO_L_WARN && !sfio_no_color_print)
 			dprintf(fd, "\x1b[0m");
 	}
 	
 	va_end (args);
+}
+
+int sfio_parse_llong(char *arg, long long *value) {
+	long long val;
+	char *endptr;
+	
+	if ('0' <= arg[0] && arg[0] <= '9') {
+		if (arg[0] == '0' && arg[1] == 'x') {
+			val = strtoll(arg, &endptr, 16);
+		} else {
+			val = strtoll(arg, &endptr, 10);
+		}
+		
+		if (endptr) {
+			if ((errno == ERANGE && (val == LLONG_MAX || val == LLONG_MIN)) || (errno != 0 && val == 0)) {
+				fprintf(stderr, "No digits were found\n");
+				return -EINVAL;
+			}
+			
+			if (endptr == arg) {
+				fprintf(stderr, "No digits were found\n");
+				return -EINVAL;
+			}
+		}
+	} else {
+		fprintf(stderr, "invalid argument: %s\n", arg);
+		return -EINVAL;
+	}
+	
+	*value = val;
+	
+	return 0;
 }
 
 void sfio_print_stats(struct sparse_fio_transfer *transfer) {
@@ -195,21 +161,21 @@ void sfio_print_stats(struct sparse_fio_transfer *transfer) {
 	{
 		if (transfer->osize_last_block > 0) {
 			// move cursor up one line, erase line, return cursor to first column
-			// print(L_INFO, "\033[A\33[2K\r");
+			// sfio_print(SFIO_L_INFO, "\033[A\33[2K\r");
 			
 			// erase line and return
-			print(L_INFO, "\33[2K\r");
+			sfio_print(SFIO_L_INFO, "\33[2K\r");
 		}
-		print(L_INFO, "written %5.3f MB %7.3f MB/s ",
+		sfio_print(SFIO_L_INFO, "written %5.3f MB %7.3f MB/s ",
 				(float) transfer->written_bytes / 1024 / 1024,
 				transfer->bm_avg_speed / 1024 / 1024
 			);
 		if (transfer->bytes_to_write && transfer->bm_avg_speed > 0) {
-			print(L_INFO, "time left: %4.1f s",
+			sfio_print(SFIO_L_INFO, "time left: %4.1f s",
 					(transfer->bytes_to_write - transfer->written_bytes) / transfer->bm_avg_speed
 				);
 		} else {
-			print(L_INFO, "");
+			sfio_print(SFIO_L_INFO, "");
 		}
 	}
 	#endif
@@ -231,14 +197,14 @@ static int write_helper_mmap(struct sparse_fio_transfer *transfer, void *buffer,
 		// copy data into the kernel's write buffer
 		r = write(transfer->ofd, buffer + j, write_block_size);
 		if (r < write_block_size) {
-			print(L_ERR, "write failed (%zd): %s\n", r, strerror(errno));
+			sfio_print(SFIO_L_ERR, "write failed (%zd): %s\n", r, strerror(errno));
 			return -errno;
 		}
 		
 		// start "flush to disk" of the current blocks asynchronously
 		r = sync_file_range(transfer->ofd, transfer->ooffset, write_block_size, SYNC_FILE_RANGE_WRITE);
 		if (r < 0) {
-			print(L_ERR, "sync_file_range 1 failed (%zd): %s\n", r, strerror(errno));
+			sfio_print(SFIO_L_ERR, "sync_file_range 1 failed (%zd): %s\n", r, strerror(errno));
 			return -errno;
 		}
 		
@@ -247,7 +213,7 @@ static int write_helper_mmap(struct sparse_fio_transfer *transfer, void *buffer,
 			r = sync_file_range(transfer->ofd, transfer->ooffset_last_block, transfer->osize_last_block,
 				SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
 			if (r < 0) {
-				print(L_ERR, "sync_file_range 2 failed (%zd): %s\n", r, strerror(errno));
+				sfio_print(SFIO_L_ERR, "sync_file_range 2 failed (%zd): %s\n", r, strerror(errno));
 				return -errno;
 			}
 			
@@ -275,7 +241,7 @@ static int write_helper_stream(struct sparse_fio_transfer *transfer, void *buffe
 	
 	r = write(transfer->ofd, buffer, length);
 	if (r < length) {
-		print(L_ERR, "write failed: %s\n", strerror(errno));
+		sfio_print(SFIO_L_ERR, "write failed: %s\n", strerror(errno));
 		return -errno;
 	}
 	transfer->written_bytes += length;
@@ -296,7 +262,7 @@ static int read_helper_stream(struct sparse_fio_transfer *transfer, void *buffer
 	while (length > 0) {
 		r = read(transfer->ifd, buffer, length);
 		if (r < 0) {
-			print(L_ERR, "read failed: %s\n", strerror(errno));
+			sfio_print(SFIO_L_ERR, "read failed: %s\n", strerror(errno));
 			return -errno;
 		} else
 		if (r == 0) {
@@ -311,47 +277,14 @@ static int read_helper_stream(struct sparse_fio_transfer *transfer, void *buffer
 	return bytes_read;
 }
 
-static int parse_llong(char *arg, long long *value) {
-	long long val;
-	char *endptr;
-	
-	if ('0' <= arg[0] && arg[0] <= '9') {
-		if (arg[0] == '0' && arg[1] == 'x') {
-			val = strtoll(arg, &endptr, 16);
-		} else {
-			val = strtoll(arg, &endptr, 10);
-		}
-		
-		if (endptr) {
-			if ((errno == ERANGE && (val == LLONG_MAX || val == LLONG_MIN)) || (errno != 0 && val == 0)) {
-				fprintf(stderr, "No digits were found\n");
-				return -EINVAL;
-			}
-			
-			if (endptr == arg) {
-				fprintf(stderr, "No digits were found\n");
-				return -EINVAL;
-			}
-		}
-	} else {
-		fprintf(stderr, "invalid argument: %s\n", arg);
-		return -EINVAL;
-	}
-	
-	*value = val;
-	
-	return 0;
-}
-
-
 int sfio_init() {
 	char *verbosity;
 	long long level;
 	
 	verbosity = getenv("SFIO_VERBOSITY");
 	if (verbosity) {
-		if (parse_llong(verbosity, &level) < 0) {
-			print(L_ERR, "cannot parse SFIO_VERBOSITY=\"%s\"\n", verbosity);
+		if (sfio_parse_llong(verbosity, &level) < 0) {
+			sfio_print(SFIO_L_ERR, "cannot parse SFIO_VERBOSITY=\"%s\"\n", verbosity);
 		} else {
 			sfio_verbosity = level;
 		}
@@ -380,34 +313,34 @@ int show_and_check_device_info(char *filepath) {
 	
 	probe = blkid_new_probe_from_filename(filepath);
 	if (!probe) {
-		print(L_ERR, "failed to create new blkid probe from \"%s\" (%d)\n", filepath, errno);
+		sfio_print(SFIO_L_ERR, "failed to create new blkid probe from \"%s\" (%d)\n", filepath, errno);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
 	
 	if (!blkid_probe_is_wholedisk(probe)) {
-		print(L_WARN, "warning: %s is not a disk\n", filepath);
+		sfio_print(SFIO_L_WARN, "warning: %s is not a disk\n", filepath);
 		err = DEV_CHECK_WARN;
 		goto done;
 	}
 	
 	r = blkid_devno_to_wholedisk(blkid_probe_get_devno(probe), disk_name, sizeof(disk_name), &disk_number);
 	if (r) {
-		print(L_ERR, "blkid_devno_to_wholedisk failed for \"%s\"\n", filepath);
+		sfio_print(SFIO_L_ERR, "blkid_devno_to_wholedisk failed for \"%s\"\n", filepath);
 	} else {
 		FILE *f;
 		
 		snprintf(buf, 64, "/sys/block/%s/device/model", disk_name);
 		f = fopen(buf, "r");
 		if (!f) {
-			print(L_ERR, "opening \"%s\" failed: %s\n", filepath, strerror(errno));
+			sfio_print(SFIO_L_ERR, "opening \"%s\" failed: %s\n", filepath, strerror(errno));
 		} else {
 			size = fread(buf, 1, sizeof(buf), f);
 			if (size > 0)
 				size -= 1;
 			buf[size] = 0;
 			
-			print(L_INFO, "Disk model:          %16s\n", buf);
+			sfio_print(SFIO_L_INFO, "Disk model:          %16s\n", buf);
 			
 			fclose(f);
 		}
@@ -415,23 +348,23 @@ int show_and_check_device_info(char *filepath) {
 	
 	partlist = blkid_probe_get_partitions(probe);
 	if (!partlist) {
-		print(L_ERR, "failed to read partitions from \"%s\" (%d)\n", filepath, errno);
+		sfio_print(SFIO_L_ERR, "failed to read partitions from \"%s\" (%d)\n", filepath, errno);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
 	
 	root_tab = blkid_partlist_get_table(partlist);
 	if (!root_tab) {
-		print(L_ERR, "unknown partition table on \"%s\"\n", filepath);
+		sfio_print(SFIO_L_ERR, "unknown partition table on \"%s\"\n", filepath);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
 	
-	print(L_INFO, "Disk Id:           %16s\n", blkid_parttable_get_id(root_tab));
+	sfio_print(SFIO_L_INFO, "Disk Id:           %16s\n", blkid_parttable_get_id(root_tab));
 	
 	nparts = blkid_partlist_numof_partitions(partlist);
 	if (!nparts) {
-		print(L_ERR, "could not get partitions on \"%s\"\n", filepath);
+		sfio_print(SFIO_L_ERR, "could not get partitions on \"%s\"\n", filepath);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
@@ -445,12 +378,12 @@ int show_and_check_device_info(char *filepath) {
 	
 	r = mnt_table_parse_mtab(mtab, 0);
 	if (r) {
-		print(L_ERR, "could not parse mtab\n");
+		sfio_print(SFIO_L_ERR, "could not parse mtab\n");
 		err = DEV_CHECK_QUERY_FAILED;
 		mtab = 0;
 	}
 	
-	print(L_INFO, "Partitions:\n");
+	sfio_print(SFIO_L_INFO, "Partitions:\n");
 	
 	for (i = 0; i < nparts; i++) {
 		const char *p;
@@ -464,7 +397,7 @@ int show_and_check_device_info(char *filepath) {
 		
 		snprintf(buf, sizeof(buf), "%s%u", blkid_devno_to_devname(disk_number), blkid_partition_get_partno(par));
 		
-		print(L_INFO, "\t%s: %10llu %10llu  0x%02x",
+		sfio_print(SFIO_L_INFO, "\t%s: %10llu %10llu  0x%02x",
 				buf,
 				(unsigned long long) blkid_partition_get_start(par),
 				(unsigned long long) blkid_partition_get_size(par),
@@ -473,24 +406,24 @@ int show_and_check_device_info(char *filepath) {
 		
 		if (root_tab != tab)
 			/* subpartition (BSD, Minix, ...) */
-			print(L_INFO, " (%s)", blkid_parttable_get_type(tab));
+			sfio_print(SFIO_L_INFO, " (%s)", blkid_parttable_get_type(tab));
 		
 		p = blkid_partition_get_name(par);
 		if (p)
-			print(L_INFO, " name='%s'", p);
+			sfio_print(SFIO_L_INFO, " name='%s'", p);
 		p = blkid_partition_get_uuid(par);
 		if (p)
-			print(L_INFO, " uuid='%s'", p);
+			sfio_print(SFIO_L_INFO, " uuid='%s'", p);
 		p = blkid_partition_get_type_string(par);
 		if (p)
-			print(L_INFO, " type='%s'", p);
+			sfio_print(SFIO_L_INFO, " type='%s'", p);
 		
-		print(L_INFO, "\n");
+		sfio_print(SFIO_L_INFO, "\n");
 		
 		if (mtab) {
 			fs = mnt_table_find_source(mtab, buf, MNT_ITER_FORWARD);
 			if (fs) {
-				print(L_WARN, "warning: %s is mounted\n", buf);
+				sfio_print(SFIO_L_WARN, "warning: %s is mounted\n", buf);
 				err = DEV_CHECK_WARN;
 			}
 		}
@@ -520,13 +453,13 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	
 	if (transfer->ifd < 0) {
 		if (!transfer->ifilepath) {
-			print(L_ERR, "error, no file descriptor or file path given\n");
+			sfio_print(SFIO_L_ERR, "error, no file descriptor or file path given\n");
 			return -EINVAL;
 		}
 			
 		transfer->ifd = open(transfer->ifilepath, O_RDONLY);
 		if (transfer->ifd < 0) {
-			print(L_ERR, "open \"%s\" failed: %s\n", transfer->ifilepath, strerror(errno));
+			sfio_print(SFIO_L_ERR, "open \"%s\" failed: %s\n", transfer->ifilepath, strerror(errno));
 			return -errno;
 		}
 	}
@@ -536,7 +469,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		size_t fiemap_size;
 		
 		if (fstat(transfer->ifd, &stat) == -1) {
-			print(L_ERR, "fstat for \"%s\" failed: %s\n", transfer->ifilepath, strerror(errno));
+			sfio_print(SFIO_L_ERR, "fstat for \"%s\" failed: %s\n", transfer->ifilepath, strerror(errno));
 			return -errno;
 		}
 		
@@ -544,7 +477,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			long long dev_size;
 			
 			if (ioctl(transfer->ifd, BLKGETSIZE64, &dev_size) < 0) {
-				print(L_ERR, "ioctl(BLKGETSIZE64) failed: %s\n", strerror(errno));
+				sfio_print(SFIO_L_ERR, "ioctl(BLKGETSIZE64) failed: %s\n", strerror(errno));
 				return -errno;
 			}
 			transfer->isize = dev_size;
@@ -559,11 +492,11 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 		
 		if (transfer->isize == 0) {
-			print(L_INFO, "empty input file, will do nothing.\n");
+			sfio_print(SFIO_L_INFO, "empty input file, will do nothing.\n");
 			return 0;
 		}
 		
-		print(L_INFO, "Input size:        %16zu (%6zu MB)\n", transfer->isize, transfer->isize / 1024 / 1024);
+		sfio_print(SFIO_L_INFO, "Input size:        %16zu (%6zu MB)\n", transfer->isize, transfer->isize / 1024 / 1024);
 		
 		// check if we can get a fiemap for the input file (fiemap contains information
 		// about sparse/zero blocks in the file)
@@ -571,7 +504,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			fiemap_size = sizeof(struct fiemap);
 			fiemap = (struct fiemap*) calloc(1, fiemap_size);
 			if (!fiemap) {
-				print(L_ERR, "error while allocating %zu bytes of memory\n", fiemap_size);	
+				sfio_print(SFIO_L_ERR, "error while allocating %zu bytes of memory\n", fiemap_size);	
 				return -ENOMEM;
 			}
 			
@@ -580,7 +513,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			fiemap->fm_length = FIEMAP_MAX_OFFSET;
 			
 			if (ioctl(transfer->ifd, FS_IOC_FIEMAP, fiemap) < 0) {
-				print(L_DBG, "error ioctl(FS_IOC_FIEMAP) \"%s\", continue without fiemap\n", strerror(errno));
+				sfio_print(SFIO_L_DBG, "error ioctl(FS_IOC_FIEMAP) \"%s\", continue without fiemap\n", strerror(errno));
 				free(fiemap);
 				fiemap = 0;
 			}
@@ -601,7 +534,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				fiemap_size = sizeof(struct fiemap) + extents_size;
 				fiemap = (struct fiemap*) realloc(fiemap, fiemap_size);
 				if (!fiemap) {
-					print(L_ERR, "error while allocating %zu bytes of memory\n", fiemap_size);
+					sfio_print(SFIO_L_ERR, "error while allocating %zu bytes of memory\n", fiemap_size);
 					return -ENOMEM;
 				}
 			}
@@ -612,7 +545,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			fiemap->fm_mapped_extents = 0;
 			
 			if (ioctl(transfer->ifd, FS_IOC_FIEMAP, fiemap) < 0) {
-				print(L_DBG, "ioctl(fiemap) 2 failed: %s, continue without fiemap\n", strerror(errno));
+				sfio_print(SFIO_L_DBG, "ioctl(fiemap) 2 failed: %s, continue without fiemap\n", strerror(errno));
 				free(fiemap);
 				fiemap = 0;
 			}
@@ -628,7 +561,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				if (transfer->isize_nonzero > transfer->isize)
 					transfer->isize_nonzero = transfer->isize;
 				
-				print(L_INFO, "Non-zero bytes:    %16zu (%6zu MB) (approx.)\n", transfer->isize_nonzero, transfer->isize_nonzero / 1024 / 1024);
+				sfio_print(SFIO_L_INFO, "Non-zero bytes:    %16zu (%6zu MB) (approx.)\n", transfer->isize_nonzero, transfer->isize_nonzero / 1024 / 1024);
 			}
 		} else {
 			transfer->isize_nonzero = transfer->isize;
@@ -656,7 +589,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			transfer->isize_nonzero = transfer->isize;
 	}
 	
-	print(L_INFO, "\n");
+	sfio_print(SFIO_L_INFO, "\n");
 	
 	/*
 	 * open output file
@@ -666,7 +599,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	
 	if (transfer->ofd < 0) {
 		if (!transfer->ofilepath) {
-			print(L_ERR, "error, no file descriptor or file path given\n");
+			sfio_print(SFIO_L_ERR, "error, no file descriptor or file path given\n");
 			return -EINVAL;
 		}
 		
@@ -677,13 +610,13 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				output_exists = 1;
 			} 
 			if (transfer->ofd < 0) {
-				print(L_ERR, "open \"%s\" failed: %s\n", transfer->ofilepath, strerror(errno));
+				sfio_print(SFIO_L_ERR, "open \"%s\" failed: %s\n", transfer->ofilepath, strerror(errno));
 				return -errno;
 			}
 		}
 	}
 	
-	print(L_DBG, "ifd %d ofd %d (stdin %d stdout %d stderr %d)\n", transfer->ifd, transfer->ofd, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO);
+	sfio_print(SFIO_L_DBG, "ifd %d ofd %d (stdin %d stdout %d stderr %d)\n", transfer->ifd, transfer->ofd, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO);
 	
 	if (transfer->isize_nonzero > 0 || (transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// increase required file size if we use our own packed format for the output file
@@ -701,10 +634,10 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		off_t foff = lseek(transfer->ofd, 0, SEEK_CUR);
 		if (foff == sizeof(off_t)-1) {
 			if (errno == ESPIPE) {
-				print(L_DBG, "output fd is not seekable\n");
+				sfio_print(SFIO_L_DBG, "output fd is not seekable\n");
 				transfer->oflags |= SFIO_IS_STREAM;
 			} else {
-				print(L_ERR, "lseek check failed: %s\n", strerror(errno));
+				sfio_print(SFIO_L_ERR, "lseek check failed: %s\n", strerror(errno));
 				return -errno;
 			}
 		}
@@ -712,7 +645,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	
 	if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
 		if (fstat(transfer->ofd, &stat) == -1) {
-			print(L_ERR, "fstat for \"%s\" failed: %s\n", transfer->ofilepath, strerror(errno));
+			sfio_print(SFIO_L_ERR, "fstat for \"%s\" failed: %s\n", transfer->ofilepath, strerror(errno));
 			return -errno;
 		}
 		
@@ -721,16 +654,16 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			long long dev_size;
 			
 			if (ioctl(transfer->ofd, BLKGETSIZE64, &dev_size) < 0) {
-				print(L_ERR, "ioctl(BLKGETSIZE64) failed: %s\n", strerror(errno));
+				sfio_print(SFIO_L_ERR, "ioctl(BLKGETSIZE64) failed: %s\n", strerror(errno));
 				return -errno;
 			}
 			transfer->osize_max = dev_size;
 			transfer->oflags |= SFIO_IS_BLOCKDEV;
 			
-			print(L_INFO, "Output device size:%16zu (%6zu MB)\n", transfer->osize_max, transfer->osize_max / 1024 / 1024);
+			sfio_print(SFIO_L_INFO, "Output device size:%16zu (%6zu MB)\n", transfer->osize_max, transfer->osize_max / 1024 / 1024);
 			
 			if (transfer->osize_max < transfer->bytes_to_write) {
-				print(L_ERR, "error, device size is too small (%zu < %zu)\n", transfer->osize_max, transfer->bytes_to_write);
+				sfio_print(SFIO_L_ERR, "error, device size is too small (%zu < %zu)\n", transfer->osize_max, transfer->bytes_to_write);
 				return -EINVAL;
 			}
 			
@@ -750,7 +683,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			#endif
 		} else {
 			if (output_exists) {
-				print(L_WARN, "warning: %s already exists, will overwrite file\n", transfer->ofilepath);
+				sfio_print(SFIO_L_WARN, "warning: %s already exists, will overwrite file\n", transfer->ofilepath);
 				
 				if (!transfer->ignore_warnings) {
 					transfer->ask = 1;
@@ -761,22 +694,22 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			
 			// erase content of the output file
 			if (ftruncate(transfer->ofd, 0) < 0) {
-				print(L_ERR, "ftruncate failed: %s\n", strerror(errno));
+				sfio_print(SFIO_L_ERR, "ftruncate failed: %s\n", strerror(errno));
 				return -errno;
 			}
 		}
 	} else {
-		print(L_DBG, "note: output is not seekable\n");
+		sfio_print(SFIO_L_DBG, "note: output is not seekable\n");
 	}
 	
 	if (transfer->bytes_to_write > 0)
-		print(L_INFO, "\nTransfer size:     %16zu (%6zu MB)\n", transfer->bytes_to_write, transfer->bytes_to_write / 1024 / 1024);
+		sfio_print(SFIO_L_INFO, "\nTransfer size:     %16zu (%6zu MB)\n", transfer->bytes_to_write, transfer->bytes_to_write / 1024 / 1024);
 	
 	if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// map the input file into memory
 		input = mmap(0, transfer->isize, PROT_READ, MAP_SHARED, transfer->ifd, 0);
 		if (input == MAP_FAILED) {
-			print(L_ERR, "error, mmap input failed: %s, continue without\n", strerror(errno));
+			sfio_print(SFIO_L_ERR, "error, mmap input failed: %s, continue without\n", strerror(errno));
 			input = 0;
 		}
 	} else {
@@ -786,7 +719,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	if (transfer->ask) {
 		int input;
 		
-		printf("\nStart? ([y]/n)\n");
+		printf("\nStart? ([y]/n) ");
 		input = getchar();
 		if (input == 'y') {
 			input = getchar();
@@ -819,7 +752,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			
 			r = ioctl(transfer->ofd, BLKDISCARD, &range);
 			if (r < 0)
-				print(L_INFO, "optional BLKDISCARD ioctl failed: %s\n", strerror(errno));
+				sfio_print(SFIO_L_INFO, "optional BLKDISCARD ioctl failed: %s\n", strerror(errno));
 		}
 	}
 	
@@ -827,12 +760,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	if (transfer->oflags & SFIO_IS_PACKED) {
 		struct sparse_fio_header hdr;
 		
-		print(L_DBG, "will write in packed format\n");
+		sfio_print(SFIO_L_DBG, "will write in packed format\n");
 		
 		memcpy(hdr.magic, "SPARSE_FIO", 10);
 		hdr.version = 1;
 		
-		print(L_DBG, "write sfio hdr %zu\n", sizeof(hdr));
+		sfio_print(SFIO_L_DBG, "write sfio hdr %zu\n", sizeof(hdr));
 		r = write_helper_stream(transfer, &hdr, sizeof(hdr));
 		if (r < 0)
 			return r;
@@ -855,7 +788,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		// rewind in any case
 		transfer->ioffset = lseek(transfer->ifd, 0, SEEK_SET);
 		if (transfer->ioffset == sizeof(off_t)-1) {
-			print(L_ERR, "lseek in input failed: %s\n", strerror(errno));
+			sfio_print(SFIO_L_ERR, "lseek in input failed: %s\n", strerror(errno));
 			return -errno;
 		}
 	}
@@ -885,7 +818,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			v1_hdr.unpacked_size = transfer->isize; // input is not packed
 			v1_hdr.nonzero_size = transfer->isize_nonzero;
 			
-			print(L_DBG, "write sfio v1 hdr %zu\n", sizeof(v1_hdr));
+			sfio_print(SFIO_L_DBG, "write sfio v1 hdr %zu\n", sizeof(v1_hdr));
 			r = write_helper_stream(transfer, &v1_hdr, sizeof(v1_hdr));
 			if (r < 0)
 				return r;
@@ -909,14 +842,14 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						ex_start);
 					v1_block.size = htole64(ex_length);
 					
-					print(L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
+					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
 					r = write_helper_stream(transfer, &v1_block, sizeof(v1_block));
 					if (r < 0)
 						return r;
 				} else {
 					transfer->ooffset = lseek(transfer->ofd, ex_start, SEEK_SET);
 					if (transfer->ooffset != ex_start) {
-						print(L_ERR, "lseek failed (%" PRIdMAX " != %llu): %s\n", transfer->ooffset, ex_start, strerror(errno));
+						sfio_print(SFIO_L_ERR, "lseek failed (%" PRIdMAX " != %llu): %s\n", transfer->ooffset, ex_start, strerror(errno));
 						return -errno;
 					}
 				}
@@ -929,7 +862,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						ex_start);
 					v1_block.size = htole64(ex_length);
 					
-					print(L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
+					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
 					r = write_helper_stream(transfer, &v1_block, sizeof(v1_block));
 					if (r < 0)
 						return r;
@@ -954,7 +887,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 								left = n_zeros;
 							r = write(transfer->ofd, zero_block, left);
 							if (r < sizeof(zero_block)) {
-								print(L_ERR, "write failed: %s\n", strerror(errno));
+								sfio_print(SFIO_L_ERR, "write failed: %s\n", strerror(errno));
 								return -errno;
 							}
 							n_zeros -= sizeof(zero_block);
@@ -969,7 +902,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 		
 		if (transfer->ooffset < transfer->osize) {
-			print(L_DBG, "handle trailing zeros\n");
+			sfio_print(SFIO_L_DBG, "handle trailing zeros\n");
 			
 			if (transfer->oflags & SFIO_IS_PACKED) {
 				struct sparse_fio_v1_block ov1_block;
@@ -977,7 +910,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				ov1_block.start = transfer->ioffset;
 				ov1_block.size = 0;
 				
-				print(L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
+				sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
 				r = write_helper_stream(transfer, &ov1_block, sizeof(ov1_block));
 				if (r < 0)
 					return r;
@@ -985,7 +918,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
 					r = ftruncate(transfer->ofd, transfer->osize);
 					if (r < 0) {
-						print(L_ERR, "ftruncate failed: %s\n", strerror(errno));
+						sfio_print(SFIO_L_ERR, "ftruncate failed: %s\n", strerror(errno));
 						return r;
 					}
 				} else {
@@ -1010,14 +943,14 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			return r;
 		}
 		if (bytes_read == sizeof(struct sparse_fio_header) && !memcmp(hdr.magic, "SPARSE_FIO", 10)) {
-			print(L_INFO, "packed input detected (version %u)\n", hdr.version);
+			sfio_print(SFIO_L_INFO, "packed input detected (version %u)\n", hdr.version);
 			
 			transfer->iflags |= SFIO_IS_PACKED;
 			add_hdr_to_block = 0;
 			transfer->ioffset += sizeof(struct sparse_fio_header);
 			
 			if (hdr.version != 1) {
-				print(L_ERR, "unsupported version %u\n", hdr.version);
+				sfio_print(SFIO_L_ERR, "unsupported version %u\n", hdr.version);
 				return -EINVAL;
 			}
 			
@@ -1026,7 +959,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				return bytes_read;
 			}
 			if (bytes_read < sizeof(struct sparse_fio_v1_header)) {
-				print(L_ERR, "invalid packed format: v1 hdr (%zu < %zu)\n", bytes_read, sizeof(struct sparse_fio_v1_header));
+				sfio_print(SFIO_L_ERR, "invalid packed format: v1 hdr (%zu < %zu)\n", bytes_read, sizeof(struct sparse_fio_v1_header));
 				return -EINVAL;
 			}
 			
@@ -1034,11 +967,11 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			
 			if (v1_hdr.unpacked_size) {
 				transfer->osize = v1_hdr.unpacked_size;
-				print(L_INFO, "Unpacked total size:    %16zu (%6zu MB)\n", v1_hdr.unpacked_size, v1_hdr.unpacked_size / 1024 / 1024);
+				sfio_print(SFIO_L_INFO, "Unpacked total size:    %16zu (%6zu MB)\n", v1_hdr.unpacked_size, v1_hdr.unpacked_size / 1024 / 1024);
 			}
 			if (v1_hdr.nonzero_size) {
 				transfer->bytes_to_write = v1_hdr.nonzero_size;
-				print(L_INFO, "Unpacked non-zero size: %16zu (%6zu MB) (approx.)\n", v1_hdr.nonzero_size, v1_hdr.nonzero_size / 1024 / 1024);
+				sfio_print(SFIO_L_INFO, "Unpacked non-zero size: %16zu (%6zu MB) (approx.)\n", v1_hdr.nonzero_size, v1_hdr.nonzero_size / 1024 / 1024);
 			}
 		}
 		
@@ -1049,7 +982,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			v1_hdr.unpacked_size = transfer->isize;
 			v1_hdr.nonzero_size = 0; // unknown at this time
 			
-			print(L_DBG, "write v1 hdr %zu\n", sizeof(v1_hdr));
+			sfio_print(SFIO_L_DBG, "write v1 hdr %zu\n", sizeof(v1_hdr));
 			r = write_helper_stream(transfer, &v1_hdr, sizeof(v1_hdr));
 			if (r < 0)
 				return r;
@@ -1061,7 +994,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		if (input == 0) {
 			cur_block = malloc(max_chunk_size);
 			if (!cur_block) {
-				print(L_ERR, "malloc failed\n");
+				sfio_print(SFIO_L_ERR, "malloc failed\n");
 				exit(1);
 			}
 		}
@@ -1082,7 +1015,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					break;
 				}
 				if (bytes_read < sizeof(struct sparse_fio_v1_block)) {
-					print(L_ERR, "invalid packed format: v1 block (%zu < %zu)\n", bytes_read, sizeof(struct sparse_fio_v1_block));
+					sfio_print(SFIO_L_ERR, "invalid packed format: v1 block (%zu < %zu)\n", bytes_read, sizeof(struct sparse_fio_v1_block));
 					return -EINVAL;
 				}
 				transfer->ioffset += sizeof(struct sparse_fio_v1_block);
@@ -1090,7 +1023,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				iv1_block.start = transfer->ioffset;
 				iv1_block.size = ov1_block.size;
 			}
-			print(L_DBG, "read block %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n\n", iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);print(L_DBG, "\n");
+			sfio_print(SFIO_L_DBG, "read block %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n\n", iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);
+			sfio_print(SFIO_L_DBG, "\n");
 			
 			if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
 				// avoid the possibility of a negative assignment to iv1_block.size
@@ -1100,7 +1034,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				if (transfer->ioffset + iv1_block.size >= transfer->isize)
 					iv1_block.size = transfer->isize - transfer->ioffset;
 			}
-// 			
+			
 			while (!stop) {
 				char only_zeros = 0;
 				
@@ -1125,7 +1059,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 								chunk_size - sizeof(struct sparse_fio_header)
 							);
 						if (bytes_read < 0) {
-							print(L_ERR, "read failed: %s\n", strerror(errno));
+							sfio_print(SFIO_L_ERR, "read failed: %s\n", strerror(errno));
 							return -errno;
 						}
 						if (bytes_read == 0) {
@@ -1138,9 +1072,9 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						bytes_read = read_helper_stream(transfer, cur_block, chunk_size);
 					}
 					
-					print(L_DBG, "read %zd %"PRIu64" \n", bytes_read, iv1_block.size);
+					sfio_print(SFIO_L_DBG, "read %zd %"PRIu64" \n", bytes_read, iv1_block.size);
 					if (bytes_read < 0) {
-						print(L_ERR, "read failed: %s\n", strerror(errno));
+						sfio_print(SFIO_L_ERR, "read failed: %s\n", strerror(errno));
 						return -errno;
 					}
 					if (bytes_read == 0) {
@@ -1180,21 +1114,21 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						// we do not write blocks with only zeros in packed mode
 						last_block_empty = 1;
 					} else {
-						print(L_DBG, "will create gap with %zu bytes\n", chunk_size);
+						sfio_print(SFIO_L_DBG, "will create gap with %zu bytes\n", chunk_size);
 						
 						if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
 							// create a gap in the output file
 							if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
 								r = ftruncate(transfer->ofd, transfer->ooffset + chunk_size);
 								if (r < 0) {
-									print(L_ERR, "ftruncate failed: %s\n", strerror(errno));
+									sfio_print(SFIO_L_ERR, "ftruncate failed: %s\n", strerror(errno));
 									return r;
 								}
 							}
 							
 							transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
 							if (transfer->ooffset == sizeof(off_t)-1) {
-								print(L_ERR, "lseek failed: %s\n", strerror(errno));
+								sfio_print(SFIO_L_ERR, "lseek failed: %s\n", strerror(errno));
 								return -errno;
 							}
 						} else {
@@ -1206,8 +1140,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					}
 				} else {
 					if (transfer->oflags & SFIO_IS_PACKED) {
-						print(L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
-						print(L_DBG, "write v1 block (start %"PRIu64" size %"PRIu64") sizeof %zu\n", ov1_block.start, ov1_block.size, sizeof(ov1_block));
+						sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
+						sfio_print(SFIO_L_DBG, "write v1 block (start %"PRIu64" size %"PRIu64") sizeof %zu\n", ov1_block.start, ov1_block.size, sizeof(ov1_block));
 						
 						if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
 							r = write_helper_mmap(transfer, &ov1_block, sizeof(ov1_block));
@@ -1220,7 +1154,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						}
 					}
 					
-					print(L_DBG, "will write %zu data bytes\n", chunk_size);
+					sfio_print(SFIO_L_DBG, "will write %zu data bytes\n", chunk_size);
 					
 					if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
 						r = write_helper_mmap(transfer, cur_block, chunk_size);
@@ -1238,18 +1172,18 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		}
 		
 		if ((transfer->oflags & SFIO_IS_PACKED) && last_block_empty) {
-			print(L_DBG, "handle trailing zeros\n");
+			sfio_print(SFIO_L_DBG, "handle trailing zeros\n");
 			
 			if (transfer->oflags & SFIO_IS_PACKED) {
 				ov1_block.start = transfer->ioffset;
 				ov1_block.size = 0;
 				
-				print(L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
+				sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
 				r = write_helper_stream(transfer, &ov1_block, sizeof(ov1_block));
 				if (r < 0)
 					return r;
 			} else {
-				print(L_ERR, "err\n");
+				sfio_print(SFIO_L_ERR, "err\n");
 				exit(1);
 			}
 		}
@@ -1262,7 +1196,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	if (!transfer->no_fsync && (transfer->oflags & SFIO_IS_STREAM) == 0) {
 		r = fsync(transfer->ofd);
 		if (r < 0) {
-			print(L_ERR, "fsync failed: %s\n", strerror(errno));
+			sfio_print(SFIO_L_ERR, "fsync failed: %s\n", strerror(errno));
 			return -errno;
 		}
 	}
@@ -1282,47 +1216,50 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		time_diff = (double)(time_end.tv_sec - time_start.tv_sec)*TIMEVAL_FAC + (time_end.tv_nsec - time_start.tv_nsec);
 		
 		// move cursor up one line, erase line, return cursor to first column
-		print(L_INFO,"\033[A\33[2K\r");
+		sfio_print(SFIO_L_INFO,"\033[A\33[2K\r");
 		
-		print(L_INFO,"written %f MB in %f s -> %f MB/s\n", (float) transfer->written_bytes / 1024 / 1024, time_diff / TIMEVAL_FAC, ((float) transfer->written_bytes / 1024 / 1024) / (time_diff / TIMEVAL_FAC));
+		sfio_print(SFIO_L_INFO,"written %f MB in %f s -> %f MB/s\n", (float) transfer->written_bytes / 1024 / 1024, time_diff / TIMEVAL_FAC, ((float) transfer->written_bytes / 1024 / 1024) / (time_diff / TIMEVAL_FAC));
 	}
 	#endif
 	
 	return 0;
 }
 
+#endif // BUILD_APP_ONLY
+#ifndef BUILD_LIB_ONLY
+
 void print_help(int level) {
-	print(level, "Usage: sparse-fio [args] [<inputfile> <outputfile>]\n");
-	print(level, "\n");
-	print(level, "sparse-fio will copy data from the input to the output file.\n");
-	print(level, "If the input file is already sparse, it will only copy the non-zero\n");
-	print(level, "blocks. If the input file is not sparse, sparse-fio will read the complete\n");
-	print(level, "file and create a sparse output file.\n");
-	print(level, "\n");
-	print(level, "If no input or no output file is specified, sparse-fio will read from stdin\n");
-	print(level, "or write to stdout, respectively. If sparse-fio writes to stdout, the data\n");
-	print(level, "will be written in so-called packed format. As zero holes cannot be signaled\n");
-	print(level, "through pipes or similar, sparse-fio uses an own in-band protocol to notify the\n");
-	print(level, "other side about holes in order to avoid transferring blocks of zeros.\n");
-	print(level, "This way, images can be transferred efficiently over the network, for example.\n");
-	print(level, "\n");
-	print(level, "If the output file is actually a block device, sparse-fio will issue a BLKDISCARD\n");
-	print(level, "ioctl that instructs the disk controller to quickly forget ALL the previously\n");
-	print(level, "stored data. This is useful for SSD or SD cards where an internal controller\n");
-	print(level, "keeps track of used blocks for wear leveling. Sending a BLKDISCARD avoids\n");
-	print(level, "explicitly erasing or overwriting the old data.\n");
-	print(level, "\n");
-	print(level, "Optional arguments:\n");
-	print(level, " -a              ask before start writing\n");
-	print(level, " -C              disable colored console output\n");
-	print(level, " -D              do NOT discard ALL data on target device before writing\n");
-	print(level, " -f              force (ignore warnings)\n");
-	print(level, " -F              do not wait for completion using fsync()\n");
-	print(level, " -i <inputfile>  \n");
-	print(level, " -o <outputfile> \n");
-	print(level, " -p <0|1|2>      write in packed format: 0=off, 1=on, 2=auto (default)\n");
+	sfio_print(level, "Usage: sparse-fio [args] [<inputfile> <outputfile>]\n");
+	sfio_print(level, "\n");
+	sfio_print(level, "sparse-fio will copy data from the input to the output file.\n");
+	sfio_print(level, "If the input file is already sparse, it will only copy the non-zero\n");
+	sfio_print(level, "blocks. If the input file is not sparse, sparse-fio will read the complete\n");
+	sfio_print(level, "file and create a sparse output file.\n");
+	sfio_print(level, "\n");
+	sfio_print(level, "If no input or no output file is specified, sparse-fio will read from stdin\n");
+	sfio_print(level, "or write to stdout, respectively. If sparse-fio writes to stdout, the data\n");
+	sfio_print(level, "will be written in so-called packed format. As zero holes cannot be signaled\n");
+	sfio_print(level, "through pipes or similar, sparse-fio uses an own in-band protocol to notify the\n");
+	sfio_print(level, "other side about holes in order to avoid transferring blocks of zeros.\n");
+	sfio_print(level, "This way, images can be transferred efficiently over the network, for example.\n");
+	sfio_print(level, "\n");
+	sfio_print(level, "If the output file is actually a block device, sparse-fio will issue a BLKDISCARD\n");
+	sfio_print(level, "ioctl that instructs the disk controller to quickly forget ALL the previously\n");
+	sfio_print(level, "stored data. This is useful for SSD or SD cards where an internal controller\n");
+	sfio_print(level, "keeps track of used blocks for wear leveling. Sending a BLKDISCARD avoids\n");
+	sfio_print(level, "explicitly erasing or overwriting the old data.\n");
+	sfio_print(level, "\n");
+	sfio_print(level, "Optional arguments:\n");
+	sfio_print(level, " -a              ask before start writing\n");
+	sfio_print(level, " -C              disable colored console output\n");
+	sfio_print(level, " -D              do NOT discard ALL data on target device before writing\n");
+	sfio_print(level, " -f              force (ignore warnings)\n");
+	sfio_print(level, " -F              do not wait for completion using fsync()\n");
+	sfio_print(level, " -i <inputfile>  \n");
+	sfio_print(level, " -o <outputfile> \n");
+	sfio_print(level, " -p <0|1|2>      write in packed format: 0=off, 1=on, 2=auto (default)\n");
 	#ifndef NO_BENCHMARK
-	print(level, " -P <0|1|2>      control stats output: 0=off, 1=on, 2=auto (default)\n");
+	sfio_print(level, " -P <0|1|2>      control stats output: 0=off, 1=on, 2=auto (default)\n");
 	#endif
 }
 
@@ -1357,12 +1294,12 @@ int main(int argc, char **argv) {
 				transfer.no_fsync = 1;
 				break;
 			case 'p':
-				parse_llong(optarg, &llopt);
+				sfio_parse_llong(optarg, &llopt);
 				packed_setting = (int) llopt;
 				break;
 			case 'P':
 				#ifndef NO_BENCHMARK
-				parse_llong(optarg, &llopt);
+				sfio_parse_llong(optarg, &llopt);
 				transfer.print_stats = (int) llopt;
 				#endif
 				break;
@@ -1376,10 +1313,10 @@ int main(int argc, char **argv) {
 				transfer.ofilepath = optarg;
 				break;
 			case 'h':
-				print_help(L_INFO);
+				print_help(SFIO_L_INFO);
 				return 1;
 			default:
-				print_help(L_ERR);
+				print_help(SFIO_L_ERR);
 				return 1;
 		}
 	}
@@ -1416,12 +1353,14 @@ int main(int argc, char **argv) {
 		case 1: transfer.oflags = transfer.oflags | SFIO_IS_PACKED; break;
 		case 2: break;
 		default:
-			print(L_ERR, "invalid value for -p: %d\n", packed_setting);
-			print_help(L_ERR);
+			sfio_print(SFIO_L_ERR, "invalid value for -p: %d\n", packed_setting);
+			print_help(SFIO_L_ERR);
 			return 1;
 	}
 	
 	c = sfio_transfer(&transfer);
-	if (c < 0)
-		return c;
+	
+	return c;
 }
+
+#endif // BUILD_LIB_ONLY
