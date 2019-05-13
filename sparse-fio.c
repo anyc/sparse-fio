@@ -1250,7 +1250,7 @@ void print_help(int level) {
 	sfio_print(level, "explicitly erasing or overwriting the old data.\n");
 	sfio_print(level, "\n");
 	sfio_print(level, "Optional arguments:\n");
-	sfio_print(level, " -a              ask before start writing\n");
+	sfio_print(level, " -A              do not ask for confirmation before writing\n");
 	sfio_print(level, " -C              disable colored console output\n");
 	sfio_print(level, " -D              do NOT discard ALL data on target device before writing\n");
 	sfio_print(level, " -f              force (ignore warnings)\n");
@@ -1274,15 +1274,16 @@ int main(int argc, char **argv) {
 	transfer.ifd = -1;
 	transfer.ofd = -1;
 	transfer.discard = 1;
+	transfer.ask = 1;
 	#ifndef NO_BENCHMARK
 	transfer.print_stats = 2;
 	#endif
 	packed_setting = 2;
 	
-	while ((c = getopt(argc, argv, "haCDFfi:o:p:P:")) != -1) {
+	while ((c = getopt(argc, argv, "hACDFfi:o:p:P:")) != -1) {
 		switch (c) {
-			case 'a':
-				transfer.ask = 1;
+			case 'A':
+				transfer.ask = 0;
 				break;
 			case 'C':
 				sfio_no_color_print = 1;
