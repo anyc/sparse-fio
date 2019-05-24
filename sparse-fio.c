@@ -573,7 +573,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			switch (r) {
 				case DEV_CHECK_WARN:
 				case DEV_CHECK_QUERY_FAILED:
-					if (!transfer->ignore_warnings)
+					if (!transfer->ignore_warnings && transfer->ifilepath && transfer->ofilepath)
 						transfer->ask = 1;
 					break;
 				case DEV_CHECK_OK:
@@ -581,6 +581,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			}
 		}
 		#endif
+		
+		sfio_print(SFIO_L_INFO, "\n");
 	} else {
 		fiemap = 0;
 		
@@ -588,8 +590,6 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		if (transfer->isize && transfer->isize_nonzero == 0)
 			transfer->isize_nonzero = transfer->isize;
 	}
-	
-	sfio_print(SFIO_L_INFO, "\n");
 	
 	/*
 	 * open output file
@@ -673,7 +673,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				switch (r) {
 					case DEV_CHECK_WARN:
 					case DEV_CHECK_QUERY_FAILED:
-						if (!transfer->ignore_warnings)
+						if (!transfer->ignore_warnings && transfer->ifilepath && transfer->ofilepath)
 							transfer->ask = 1;
 						break;
 					case DEV_CHECK_OK:
@@ -683,10 +683,16 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			#endif
 		} else {
 			if (output_exists) {
-				sfio_print(SFIO_L_WARN, "warning: %s already exists, will overwrite file\n", transfer->ofilepath);
-				
 				if (!transfer->ignore_warnings) {
-					transfer->ask = 1;
+					if (transfer->ifilepath && transfer->ofilepath) {
+						sfio_print(SFIO_L_WARN, "warning: %s already exists, will overwrite file\n", transfer->ofilepath);
+						transfer->ask = 1;
+					} else {
+						sfio_print(SFIO_L_ERR, "will not overwrite %s\n", transfer->ofilepath);
+						return -EINVAL;
+					}
+				} else {
+					sfio_print(SFIO_L_WARN, "warning: %s already exists, will overwrite file\n", transfer->ofilepath);
 				}
 			}
 			
@@ -772,14 +778,14 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	}
 	
 	// if input is in packed format, disable fiemap mode as we do not need
-	// to skip holes
+	// to skip holes. NOTE: if !fiemap, we will test if the header is there again later
 	if (fiemap) {
 		unsigned char ibuffer[10];
 		r = read_helper_stream(transfer, ibuffer, 10);
 		if (r < 0) {
 			return r;
 		}
-		if (r != 10 || !memcmp(ibuffer, "SPARSE_FIO", 10)) {
+		if (r == 10 && !memcmp(ibuffer, "SPARSE_FIO", 10)) {
 			transfer->iflags |= SFIO_IS_PACKED;
 			free(fiemap);
 			fiemap = 0;
@@ -929,14 +935,13 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	} else {
 		size_t chunk_size, max_chunk_size, i;
 		char *cur_block;
-		char stop, add_hdr_to_block, last_block_empty;
+		char stop, last_block_empty;
+		size_t add_hdr_bytes_to_block;
 		ssize_t bytes_read;
 		struct sparse_fio_header hdr;
 		struct sparse_fio_v1_header v1_hdr;
 		struct sparse_fio_v1_block iv1_block, ov1_block;
 		
-		
-		add_hdr_to_block = 1;
 		
 		bytes_read = read_helper_stream(transfer, &hdr, sizeof(struct sparse_fio_header));
 		if (bytes_read < 0) {
@@ -946,7 +951,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			sfio_print(SFIO_L_INFO, "packed input detected (version %u)\n", hdr.version);
 			
 			transfer->iflags |= SFIO_IS_PACKED;
-			add_hdr_to_block = 0;
+			add_hdr_bytes_to_block = 0;
 			transfer->ioffset += sizeof(struct sparse_fio_header);
 			
 			if (hdr.version != 1) {
@@ -973,6 +978,9 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				transfer->bytes_to_write = v1_hdr.nonzero_size;
 				sfio_print(SFIO_L_INFO, "Unpacked non-zero size: %16zu (%6zu MB) (approx.)\n", v1_hdr.nonzero_size, v1_hdr.nonzero_size / 1024 / 1024);
 			}
+		} else {
+			// we will put the read bytes into the output buffer later
+			add_hdr_bytes_to_block = bytes_read;
 		}
 		
 		if (transfer->oflags & SFIO_IS_PACKED) {
@@ -1023,7 +1031,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				iv1_block.start = transfer->ioffset;
 				iv1_block.size = ov1_block.size;
 			}
-			sfio_print(SFIO_L_DBG, "read block %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n\n", iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);
+			sfio_print(SFIO_L_DBG, "will read block %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n\n", iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);
 			sfio_print(SFIO_L_DBG, "\n");
 			
 			if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
@@ -1049,9 +1057,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				if (input) {
 					cur_block = input + transfer->ioffset;
 				} else {
-					if (add_hdr_to_block) {
-						add_hdr_to_block = 0;
-						
+					if (add_hdr_bytes_to_block) {
 						memcpy(cur_block, &hdr, sizeof(struct sparse_fio_header));
 						
 						bytes_read = read_helper_stream(transfer,
@@ -1064,15 +1070,16 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						}
 						if (bytes_read == 0) {
 							stop = 1;
-							break;
 						}
 						
-						bytes_read += sizeof(struct sparse_fio_header);
+						bytes_read += add_hdr_bytes_to_block;
+						add_hdr_bytes_to_block = 0;
 					} else {
 						bytes_read = read_helper_stream(transfer, cur_block, chunk_size);
 					}
 					
 					sfio_print(SFIO_L_DBG, "read %zd %"PRIu64" \n", bytes_read, iv1_block.size);
+					
 					if (bytes_read < 0) {
 						sfio_print(SFIO_L_ERR, "read failed: %s\n", strerror(errno));
 						return -errno;
@@ -1216,7 +1223,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		time_diff = (double)(time_end.tv_sec - time_start.tv_sec)*TIMEVAL_FAC + (time_end.tv_nsec - time_start.tv_nsec);
 		
 		// move cursor up one line, erase line, return cursor to first column
-		sfio_print(SFIO_L_INFO,"\033[A\33[2K\r");
+		sfio_print(SFIO_L_INFO,"\33[2K\r");
 		
 		sfio_print(SFIO_L_INFO,"written %f MB in %f s -> %f MB/s\n", (float) transfer->written_bytes / 1024 / 1024, time_diff / TIMEVAL_FAC, ((float) transfer->written_bytes / 1024 / 1024) / (time_diff / TIMEVAL_FAC));
 	}
@@ -1333,16 +1340,24 @@ int main(int argc, char **argv) {
 	
 	sfio_init();
 	
-	if (!transfer.ifilepath) {
+	if (!transfer.ifilepath || !strcmp(transfer.ifilepath, "-")) {
 		// input is stdin
 		
+		if (transfer.ask) {
+			sfio_print(SFIO_L_ERR, "cannot use stdin for data and confirmation, use -A\n", packed_setting);
+			print_help(SFIO_L_ERR);
+			return 1;
+		}
+		
+		transfer.ifilepath = 0;
 		transfer.ifd = STDIN_FILENO;
 		transfer.iflags = SFIO_IS_STREAM;
 	}
 	
-	if (!transfer.ofilepath) {
+	if (!transfer.ofilepath || !strcmp(transfer.ofilepath, "-")) {
 		// output is stdout
 		
+		transfer.ofilepath = 0;
 		transfer.ofd = STDOUT_FILENO;
 		transfer.oflags = SFIO_IS_STREAM | SFIO_IS_PACKED;
 		
