@@ -1357,6 +1357,12 @@ int main(int argc, char **argv) {
 	if (!transfer.ofilepath || !strcmp(transfer.ofilepath, "-")) {
 		// output is stdout
 		
+		if (transfer.ask) {
+			sfio_print(SFIO_L_ERR, "cannot use stdout for data and confirmation, use -A\n", packed_setting);
+			print_help(SFIO_L_ERR);
+			return 1;
+		}
+		
 		transfer.ofilepath = 0;
 		transfer.ofd = STDOUT_FILENO;
 		transfer.oflags = SFIO_IS_STREAM | SFIO_IS_PACKED;
