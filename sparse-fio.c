@@ -617,6 +617,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	}
 	
 	sfio_print(SFIO_L_DBG, "ifd %d ofd %d (stdin %d stdout %d stderr %d)\n", transfer->ifd, transfer->ofd, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO);
+	sfio_print(SFIO_L_DBG, "iflags %s, oflags %s\n", (transfer->iflags & SFIO_IS_STREAM) ? "stream": "nostream", (transfer->oflags & SFIO_IS_STREAM) ? "stream": "nostream");
 	
 	if (transfer->isize_nonzero > 0 || (transfer->iflags & SFIO_IS_STREAM) == 0) {
 		// increase required file size if we use our own packed format for the output file
@@ -700,7 +701,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			
 			// erase content of the output file
 			if (ftruncate(transfer->ofd, 0) < 0) {
-				sfio_print(SFIO_L_ERR, "ftruncate failed: %s\n", strerror(errno));
+				sfio_print(SFIO_L_ERR, "ftruncate (erase) failed: %s\n", strerror(errno));
 				return -errno;
 			}
 		}
@@ -924,7 +925,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
 					r = ftruncate(transfer->ofd, transfer->osize);
 					if (r < 0) {
-						sfio_print(SFIO_L_ERR, "ftruncate failed: %s\n", strerror(errno));
+						sfio_print(SFIO_L_ERR, "ftruncate (trailing zeros) failed: %s\n", strerror(errno));
 						return r;
 					}
 				} else {
@@ -1128,7 +1129,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 							if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
 								r = ftruncate(transfer->ofd, transfer->ooffset + chunk_size);
 								if (r < 0) {
-									sfio_print(SFIO_L_ERR, "ftruncate failed: %s\n", strerror(errno));
+									sfio_print(SFIO_L_ERR, "ftruncate (gap) failed: %s\n", strerror(errno));
 									return r;
 								}
 							}
@@ -1222,7 +1223,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		clock_gettime(CLOCK_MONOTONIC, &time_end);
 		time_diff = (double)(time_end.tv_sec - time_start.tv_sec)*TIMEVAL_FAC + (time_end.tv_nsec - time_start.tv_nsec);
 		
-		// move cursor up one line, erase line, return cursor to first column
+		// erase line, return cursor to first column
 		sfio_print(SFIO_L_INFO,"\33[2K\r");
 		
 		sfio_print(SFIO_L_INFO,"written %f MB in %f s -> %f MB/s\n", (float) transfer->written_bytes / 1024 / 1024, time_diff / TIMEVAL_FAC, ((float) transfer->written_bytes / 1024 / 1024) / (time_diff / TIMEVAL_FAC));
@@ -1372,7 +1373,7 @@ int main(int argc, char **argv) {
 	}
 	
 	switch (packed_setting) {
-		case 0: transfer.oflags = transfer.oflags & (~SFIO_IS_PACKED); break;
+		case 0: transfer.oflags = transfer.oflags & ~(SFIO_IS_PACKED); break;
 		case 1: transfer.oflags = transfer.oflags | SFIO_IS_PACKED; break;
 		case 2: break;
 		default:
