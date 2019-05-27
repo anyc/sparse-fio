@@ -64,6 +64,19 @@ cmp test_in devsdc || { echo "error content diff"; exit 1; }
 rm devsdc
 rm test_in
 
+echo -e "Test 4b\n"
+dd if=/dev/urandom bs=16M count=10 of=test_in
+# dd if=test_in 2>/dev/null | ./sparse-fio  | ./sparse-fio -o devsdc
+dd if=test_in 2>/dev/null | ./sparse-fio -A | ./sparse-fio -A -o devsdc
+# ./sparse-fio  -i test_in -o devsdc
+BYTES_IN=$(wc -c test_in | cut -d " " -f1)
+BYTES_OUT=$(wc -c devsdc | cut -d " " -f1)
+
+[ "${BYTES_IN}" == "${BYTES_OUT}" ] || { echo "error size: ${BYTES_IN} != ${BYTES_OUT}"; exit 1; }
+cmp test_in devsdc || { echo "error content diff"; exit 1; }
+rm devsdc
+rm test_in
+
 
 echo -e "Test 5\n"
 echo "asd" | ./sparse-fio -A -p1 -o devsdc
