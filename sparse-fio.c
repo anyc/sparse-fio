@@ -314,7 +314,7 @@ int show_and_check_device_info(char *filepath) {
 	
 	probe = blkid_new_probe_from_filename(filepath);
 	if (!probe) {
-		sfio_print(SFIO_L_ERR, "failed to create new blkid probe from \"%s\" (%d)\n", filepath, errno);
+		sfio_print(SFIO_L_INFO, "failed to create new blkid probe from \"%s\" (%d)\n", filepath, errno);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
@@ -327,14 +327,14 @@ int show_and_check_device_info(char *filepath) {
 	
 	r = blkid_devno_to_wholedisk(blkid_probe_get_devno(probe), disk_name, sizeof(disk_name), &disk_number);
 	if (r) {
-		sfio_print(SFIO_L_ERR, "blkid_devno_to_wholedisk failed for \"%s\"\n", filepath);
+		sfio_print(SFIO_L_INFO, "blkid_devno_to_wholedisk failed for \"%s\"\n", filepath);
 	} else {
 		FILE *f;
 		
 		snprintf(buf, sizeof(buf), "/sys/block/%s/device/model", disk_name);
 		f = fopen(buf, "r");
 		if (!f) {
-			sfio_print(SFIO_L_ERR, "opening \"%s\" failed: %s\n", filepath, strerror(errno));
+			sfio_print(SFIO_L_INFO, "could not read block device model: %s\n", filepath, strerror(errno));
 		} else {
 			size = fread(buf, 1, sizeof(buf), f);
 			if (size > 0)
@@ -349,14 +349,14 @@ int show_and_check_device_info(char *filepath) {
 	
 	partlist = blkid_probe_get_partitions(probe);
 	if (!partlist) {
-		sfio_print(SFIO_L_ERR, "failed to read partitions from \"%s\" (%d)\n", filepath, errno);
+		sfio_print(SFIO_L_INFO, "failed to read partitions from \"%s\" (%d)\n", filepath, errno);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
 	
 	root_tab = blkid_partlist_get_table(partlist);
 	if (!root_tab) {
-		sfio_print(SFIO_L_ERR, "unknown partition table on \"%s\"\n", filepath);
+		sfio_print(SFIO_L_INFO, "unknown partition table on \"%s\"\n", filepath);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
@@ -365,7 +365,7 @@ int show_and_check_device_info(char *filepath) {
 	
 	nparts = blkid_partlist_numof_partitions(partlist);
 	if (!nparts) {
-		sfio_print(SFIO_L_ERR, "could not get partitions on \"%s\"\n", filepath);
+		sfio_print(SFIO_L_INFO, "could not get partitions on \"%s\"\n", filepath);
 		err = DEV_CHECK_QUERY_FAILED;
 		goto done;
 	}
@@ -379,7 +379,7 @@ int show_and_check_device_info(char *filepath) {
 	
 	r = mnt_table_parse_mtab(mtab, 0);
 	if (r) {
-		sfio_print(SFIO_L_ERR, "could not parse mtab\n");
+		sfio_print(SFIO_L_INFO, "could not parse mtab\n");
 		err = DEV_CHECK_QUERY_FAILED;
 		mtab = 0;
 	}
