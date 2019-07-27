@@ -181,8 +181,7 @@ void sfio_print_stats(struct sparse_fio_transfer *transfer) {
 	#endif
 }
 
-
-// helper function to write a given amount of data to a file descriptor
+// helper function to write data to a memory-mapped file
 static int write_helper_mmap(struct sparse_fio_transfer *transfer, void *buffer, size_t length) {
 	ssize_t r;
 	size_t j;
@@ -234,6 +233,7 @@ static int write_helper_mmap(struct sparse_fio_transfer *transfer, void *buffer,
 	return length;
 }
 
+// helper function to write data to a non-seekable file (stream)
 static int write_helper_stream(struct sparse_fio_transfer *transfer, void *buffer, size_t length) {
 	ssize_t r;
 	
@@ -254,6 +254,7 @@ static int write_helper_stream(struct sparse_fio_transfer *transfer, void *buffe
 	return length;
 }
 
+// helper function to read data from a non-seekable file (stream)
 static int read_helper_stream(struct sparse_fio_transfer *transfer, void *buffer, size_t length) {
 	ssize_t bytes_read;
 	ssize_t r;
@@ -440,6 +441,7 @@ done:
 }
 #endif
 
+// main function for a data transfer
 int sfio_transfer(struct sparse_fio_transfer *transfer) {
 	struct fiemap *fiemap;
 	void *input;
@@ -758,8 +760,10 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			range[1] = transfer->osize_max;
 			
 			r = ioctl(transfer->ofd, BLKDISCARD, &range);
-			if (r < 0)
+			if (r < 0) {
 				sfio_print(SFIO_L_INFO, "optional BLKDISCARD ioctl failed: %s\n", strerror(errno));
+				transfer->discard = 0;
+			}
 		}
 	}
 	
@@ -819,6 +823,10 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		if (transfer->oflags & SFIO_IS_PACKED) {
 			struct sparse_fio_v1_header v1_hdr;
 			
+			/*
+			 * write header of the packed format
+			 */
+			
 // 			v1_hdr.n_blocks = htole64(fiemap->fm_mapped_extents);
 // 			v1_hdr.flags = SFIO_HDR_FLAG_HAS_TOC;
 			v1_hdr.flags = 0;
@@ -826,6 +834,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			v1_hdr.nonzero_size = transfer->isize_nonzero;
 			
 			sfio_print(SFIO_L_DBG, "write sfio v1 hdr %zu\n", sizeof(v1_hdr));
+			
 			r = write_helper_stream(transfer, &v1_hdr, sizeof(v1_hdr));
 			if (r < 0)
 				return r;
@@ -843,6 +852,10 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				ex_length = transfer->isize - ex_start;
 			
 			if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+				/*
+				 * we either write a block header or seek to the position of the data
+				 */
+				
 				if (transfer->oflags & SFIO_IS_PACKED) {
 					v1_block.start = htole64(sizeof(struct sparse_fio_header) +
 						sizeof(struct sparse_fio_v1_block) * fiemap->fm_mapped_extents +
@@ -850,19 +863,57 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					v1_block.size = htole64(ex_length);
 					
 					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
+					
 					r = write_helper_stream(transfer, &v1_block, sizeof(v1_block));
 					if (r < 0)
 						return r;
 				} else {
-					transfer->ooffset = lseek(transfer->ofd, ex_start, SEEK_SET);
-					if (transfer->ooffset != ex_start) {
-						sfio_print(SFIO_L_ERR, "lseek failed (%" PRIdMAX " != %llu): %s\n", transfer->ooffset, ex_start, strerror(errno));
-						return -errno;
+					if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
+						transfer->ooffset = lseek(transfer->ofd, ex_start, SEEK_SET);
+						if (transfer->ooffset != ex_start) {
+							sfio_print(SFIO_L_ERR, "lseek failed (%" PRIdMAX " != %llu): %s\n", transfer->ooffset, ex_start, strerror(errno));
+							return -errno;
+						}
+					} else {
+						/* 
+						 * If the BLKDISCARD was successful, the parts we do
+						 * not write explicitly will contain zeroes. If not,
+						 * we have to overwrite the part with zeroes.
+						 */
+						
+						if (transfer->discard == 0 && transfer->write_zeroes_on_block_dev) {
+							size_t n_zeros;
+							
+							// fill the gap with zeros
+							n_zeros = transfer->osize - transfer->ooffset;
+							transfer->written_bytes += n_zeros;
+							transfer->ooffset += n_zeros;
+							
+							while (n_zeros > 0) {
+								size_t left;
+								if (n_zeros >= sizeof(zero_block))
+									left = sizeof(zero_block);
+								else
+									left = n_zeros;
+								r = write(transfer->ofd, zero_block, left);
+								if (r < sizeof(zero_block)) {
+									sfio_print(SFIO_L_ERR, "write failed: %s\n", strerror(errno));
+									return -errno;
+								}
+								n_zeros -= sizeof(zero_block);
+							}
+						}
 					}
 				}
 				
+				// write the actual data
 				write_helper_mmap(transfer, input + ex_start, ex_length);
 			} else {
+				/*
+				 * we either write a block header and the data or we fill the 
+				 * gaps with zeroes, if necessary, before writing the actual data
+				 */
+				
 				if (transfer->oflags & SFIO_IS_PACKED) {
 					v1_block.start = htole64(sizeof(struct sparse_fio_header) +
 						sizeof(struct sparse_fio_v1_block) * fiemap->fm_mapped_extents +
@@ -911,6 +962,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		if (transfer->ooffset < transfer->osize) {
 			sfio_print(SFIO_L_DBG, "handle trailing zeros\n");
 			
+			/*
+			 * if the remaining part of the input file contains only zeroes
+			 * we either write a block header with no data or use ftruncate
+			 * to enlarge the output file
+			 */
+			
 			if (transfer->oflags & SFIO_IS_PACKED) {
 				struct sparse_fio_v1_block ov1_block;
 				
@@ -929,7 +986,34 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						return r;
 					}
 				} else {
-					// we assume we wiped the block device with "discard"
+					/* 
+					 * if the BLKDISCARD was successful, the remaining part of
+					 * the block device contains only zeroes. If not, we have to
+					 * write the zeroes ourselves
+					 */
+					
+					if (transfer->discard == 0 && transfer->write_zeroes_on_block_dev) {
+						size_t n_zeros;
+						
+						// fill the gap with zeros
+						n_zeros = transfer->osize - transfer->ooffset;
+						transfer->written_bytes += n_zeros;
+						transfer->ooffset += n_zeros;
+						
+						while (n_zeros > 0) {
+							size_t left;
+							if (n_zeros >= sizeof(zero_block))
+								left = sizeof(zero_block);
+							else
+								left = n_zeros;
+							r = write(transfer->ofd, zero_block, left);
+							if (r < sizeof(zero_block)) {
+								sfio_print(SFIO_L_ERR, "write failed: %s\n", strerror(errno));
+								return -errno;
+							}
+							n_zeros -= sizeof(zero_block);
+						}
+					}
 				}
 			}
 		}
@@ -943,6 +1027,10 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		struct sparse_fio_v1_header v1_hdr;
 		struct sparse_fio_v1_block iv1_block, ov1_block;
 		
+		
+		/*
+		 * first, detect if input is a sparse-fio packed file 
+		 */
 		
 		bytes_read = read_helper_stream(transfer, &hdr, sizeof(struct sparse_fio_header));
 		if (bytes_read < 0) {
@@ -992,6 +1080,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			v1_hdr.nonzero_size = 0; // unknown at this time
 			
 			sfio_print(SFIO_L_DBG, "write v1 hdr %zu\n", sizeof(v1_hdr));
+			
 			r = write_helper_stream(transfer, &v1_hdr, sizeof(v1_hdr));
 			if (r < 0)
 				return r;
@@ -1044,6 +1133,10 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					iv1_block.size = transfer->isize - transfer->ioffset;
 			}
 			
+			/*
+			 * loop that reads and writes the data
+			 */
+			
 			while (!stop) {
 				char only_zeros = 0;
 				
@@ -1056,8 +1149,16 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					chunk_size = (iv1_block.size + iv1_block.start) - transfer->ioffset;
 				
 				if (input) {
+					// input is a memory-mapped file
+					
 					cur_block = input + transfer->ioffset;
 				} else {
+					// we have to explictly read the data
+					
+					/*
+					 * do we have to add the previously read data into the current
+					 * data buffer?
+					 */
 					if (add_hdr_bytes_to_block) {
 						memcpy(cur_block, &hdr, sizeof(struct sparse_fio_header));
 						
@@ -1104,6 +1205,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						ov1_block.size = transfer->osize - transfer->ooffset;
 				}
 				
+				// check if this block contains only zeroes
 				i = 0;
 				while (i < chunk_size) {
 					if (i + sizeof(zero_block) <= chunk_size)
@@ -1132,12 +1234,24 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 									sfio_print(SFIO_L_ERR, "ftruncate (gap) failed: %s\n", strerror(errno));
 									return r;
 								}
-							}
-							
-							transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
-							if (transfer->ooffset == sizeof(off_t)-1) {
-								sfio_print(SFIO_L_ERR, "lseek failed: %s\n", strerror(errno));
-								return -errno;
+								
+								transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
+								if (transfer->ooffset == sizeof(off_t)-1) {
+									sfio_print(SFIO_L_ERR, "lseek failed: %s\n", strerror(errno));
+									return -errno;
+								}
+							} else {
+								/* 
+								 * if the BLKDISCARD was successful, the next part of
+								 * the block device contains only zeroes. If not, we have to
+								 * write the zeroes ourselves
+								 */
+								
+								if (transfer->discard == 0 && transfer->write_zeroes_on_block_dev) {
+									r = write_helper_stream(transfer, cur_block, chunk_size);
+									if (r < 0)
+										return r;
+								}
 							}
 						} else {
 							// write zeros
@@ -1147,6 +1261,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						}
 					}
 				} else {
+					// just write the read data into the output file
+					
 					if (transfer->oflags & SFIO_IS_PACKED) {
 						sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
 						sfio_print(SFIO_L_DBG, "write v1 block (start %"PRIu64" size %"PRIu64") sizeof %zu\n", ov1_block.start, ov1_block.size, sizeof(ov1_block));
@@ -1187,6 +1303,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				ov1_block.size = 0;
 				
 				sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
+				
 				r = write_helper_stream(transfer, &ov1_block, sizeof(ov1_block));
 				if (r < 0)
 					return r;

@@ -56,6 +56,7 @@ struct sparse_fio_transfer {
 	char ask;
 	char no_fsync, ignore_warnings;
 	char discard;
+	char write_zeroes_on_block_dev;
 	
 	#ifndef NO_BENCHMARK
 	char print_stats;
