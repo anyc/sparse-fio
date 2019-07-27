@@ -303,7 +303,7 @@ int show_and_check_device_info(char *filepath) {
 	blkid_probe probe;
 	blkid_partlist partlist;
 	blkid_parttable root_tab;
-	char buf[128], disk_name[128];
+	char buf[256], disk_name[128];
 	dev_t disk_number;
 	struct libmnt_table *mtab;
 	
@@ -330,7 +330,7 @@ int show_and_check_device_info(char *filepath) {
 	} else {
 		FILE *f;
 		
-		snprintf(buf, 64, "/sys/block/%s/device/model", disk_name);
+		snprintf(buf, sizeof(buf), "/sys/block/%s/device/model", disk_name);
 		f = fopen(buf, "r");
 		if (!f) {
 			sfio_print(SFIO_L_ERR, "opening \"%s\" failed: %s\n", filepath, strerror(errno));
