@@ -1,4 +1,11 @@
 
+PKG_CONFIG?=pkg-config
+INSTALL?=install
+prefix?=/usr/local
+bindir?=$(prefix)/bin
+libdir?=$(prefix)/lib
+includedir?=$(prefix)/include/
+
 app=sparse-fio
 lib=libsfio.so
 
@@ -13,8 +20,8 @@ CFLAGS+=-DNO_BENCHMARK
 endif
 
 ifneq ($(WITH_UTIL_LINUX),0)
-CFLAGS+=-DWITH_UTIL_LINUX=1
-LDLIBS+=-lmount -lblkid
+CFLAGS+=-DWITH_UTIL_LINUX=1 $(shell $(PKG_CONFIG) --cflags mount blkid)
+LDLIBS+=$(shell $(PKG_CONFIG) --libs mount blkid)
 endif
 
 ifneq ($(BUILD_SINGLE_EXECUTABLE),)
@@ -50,3 +57,13 @@ $(lib): $(app).lib.o
 
 clean:
 	rm -f *.o $(app) $(lib)
+
+install:
+	$(INSTALL) -m 755 -d $(DESTDIR)$(bindir)
+	$(INSTALL) -m 755 -d $(DESTDIR)$(libdir)
+	$(INSTALL) -m 755 -d $(DESTDIR)$(includedir)
+
+	$(INSTALL) -m 755 $(app) $(DESTDIR)$(bindir)
+	ln -s $(app) $(DESTDIR)$(bindir)/sfio
+	$(INSTALL) -m 755 $(lib) $(DESTDIR)$(libdir)
+	$(INSTALL) -m 644 sparse-fio.h $(DESTDIR)$(includedir)
