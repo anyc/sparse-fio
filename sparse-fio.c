@@ -868,40 +868,43 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					if (r < 0)
 						return r;
 				} else {
-					if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
-						transfer->ooffset = lseek(transfer->ofd, ex_start, SEEK_SET);
-						if (transfer->ooffset != ex_start) {
-							sfio_print(SFIO_L_ERR, "lseek failed (%" PRIdMAX " != %llu): %s\n", transfer->ooffset, ex_start, strerror(errno));
-							return -errno;
-						}
-					} else {
+					if (
+						(transfer->oflags & SFIO_IS_BLOCKDEV) == 1 &&
+						transfer->discard == 0 &&
+						transfer->write_zeroes_on_block_dev
+						)
+					{
+						size_t n_zeros;
+						
 						/* 
 						 * If the BLKDISCARD was successful, the parts we do
 						 * not write explicitly will contain zeroes. If not,
 						 * we have to overwrite the part with zeroes.
 						 */
 						
-						if (transfer->discard == 0 && transfer->write_zeroes_on_block_dev) {
-							size_t n_zeros;
-							
-							// fill the gap with zeros
-							n_zeros = transfer->osize - transfer->ooffset;
-							transfer->written_bytes += n_zeros;
-							transfer->ooffset += n_zeros;
-							
-							while (n_zeros > 0) {
-								size_t left;
-								if (n_zeros >= sizeof(zero_block))
-									left = sizeof(zero_block);
-								else
-									left = n_zeros;
-								r = write(transfer->ofd, zero_block, left);
-								if (r < sizeof(zero_block)) {
-									sfio_print(SFIO_L_ERR, "write failed: %s\n", strerror(errno));
-									return -errno;
-								}
-								n_zeros -= sizeof(zero_block);
+						// fill the gap with zeros
+						n_zeros = transfer->osize - transfer->ooffset;
+						transfer->written_bytes += n_zeros;
+						transfer->ooffset += n_zeros;
+						
+						while (n_zeros > 0) {
+							size_t left;
+							if (n_zeros >= sizeof(zero_block))
+								left = sizeof(zero_block);
+							else
+								left = n_zeros;
+							r = write(transfer->ofd, zero_block, left);
+							if (r < sizeof(zero_block)) {
+								sfio_print(SFIO_L_ERR, "write failed: %s\n", strerror(errno));
+								return -errno;
 							}
+							n_zeros -= sizeof(zero_block);
+						}
+					} else {
+						transfer->ooffset = lseek(transfer->ofd, ex_start, SEEK_SET);
+						if (transfer->ooffset != ex_start) {
+							sfio_print(SFIO_L_ERR, "lseek failed (%" PRIdMAX " != %llu): %s\n", transfer->ooffset, ex_start, strerror(errno));
+							return -errno;
 						}
 					}
 				}
@@ -1251,6 +1254,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 									r = write_helper_stream(transfer, cur_block, chunk_size);
 									if (r < 0)
 										return r;
+								} else {
+									transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
+									if (transfer->ooffset == sizeof(off_t)-1) {
+										sfio_print(SFIO_L_ERR, "lseek failed: %s\n", strerror(errno));
+										return -errno;
+									}
 								}
 							}
 						} else {
