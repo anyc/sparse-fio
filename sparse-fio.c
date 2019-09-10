@@ -166,9 +166,11 @@ void sfio_print_stats(struct sparse_fio_transfer *transfer) {
 			// erase line and return
 			sfio_print(SFIO_L_INFO, "\33[2K\r");
 		}
-		sfio_print(SFIO_L_INFO, "written %5.3f MB %7.3f MB/s ",
+		sfio_print(SFIO_L_INFO, "written %5.3f MB %7.3f MB/s (non-zero data: %5.3f MB) ",
 				(float) transfer->written_bytes / 1024 / 1024,
-				transfer->bm_avg_speed / 1024 / 1024
+				(float) transfer->bm_avg_speed / 1024 / 1024,
+// 				(float) (transfer->isize_nonzero - transfer->ioffset) / 1024 / 1024
+				(float) transfer->bytes_to_write / 1024 / 1024
 			);
 		if (transfer->bytes_to_write && transfer->bm_avg_speed > 0) {
 			sfio_print(SFIO_L_INFO, "time left: %4.1f s",
@@ -1269,6 +1271,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 								return r;
 						}
 					}
+					
+					transfer->bytes_to_write -= chunk_size;
 				} else {
 					// just write the read data into the output file
 					
@@ -1301,6 +1305,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				}
 				
 				transfer->ioffset += chunk_size;
+				
+				sfio_print_stats(transfer);
 			}
 		}
 		
