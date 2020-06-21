@@ -1272,7 +1272,11 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						}
 					}
 					
-					transfer->bytes_to_write -= chunk_size;
+					// bytes_to_write is 0 in stream mode
+					if (transfer->bytes_to_write >= chunk_size)
+						transfer->bytes_to_write -= chunk_size;
+					else
+						transfer->bytes_to_write = 0;
 				} else {
 					// just write the read data into the output file
 					
