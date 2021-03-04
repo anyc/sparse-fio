@@ -386,7 +386,7 @@ int show_and_check_device_info(char *filepath) {
 		mtab = 0;
 	}
 	
-	sfio_print(SFIO_L_INFO, "Partitions:\n");
+	sfio_print(SFIO_L_INFO, "Existing partitions:\n");
 	
 	for (i = 0; i < nparts; i++) {
 		const char *p;
@@ -400,10 +400,11 @@ int show_and_check_device_info(char *filepath) {
 		
 		snprintf(buf, sizeof(buf), "%s%u", blkid_devno_to_devname(disk_number), blkid_partition_get_partno(par));
 		
-		sfio_print(SFIO_L_INFO, "\t%s: %10llu %10llu  0x%02x",
+		sfio_print(SFIO_L_INFO, "\t%s: %10llu %10llu (%6llu MB)  0x%02x",
 				buf,
 				(unsigned long long) blkid_partition_get_start(par),
 				(unsigned long long) blkid_partition_get_size(par),
+				(unsigned long long) blkid_partition_get_size(par) * 512 / 1024 / 1024,
 				blkid_partition_get_type(par)
 			);
 		
