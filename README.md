@@ -4,6 +4,17 @@ sparse-fio
 Sparse-fio provides a tool to conveniently work with files that are sparsely
 filled with non-zero data, e.g., for transferring or applying filesystem images.
 
+Compared with dd, sparse-fio:
+
+ * will only write blocks with actual data by default
+ * shows information about input and output files, devices and partitions
+ * shows a warning if partitions of the output device are mounted
+ * shows progress information by default
+ * will send a discard command if the output is a block device by default (see
+   Usage below)
+ * offers in-band signaling to transfer sparse files efficiently over sockets,
+   pipes or filesystems without sparse file support
+
 What are sparse files?
 ----------------------
 
