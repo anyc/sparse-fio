@@ -521,6 +521,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				sfio_print(SFIO_L_DBG, "error ioctl(FS_IOC_FIEMAP) \"%s\", continue without fiemap\n", strerror(errno));
 				free(fiemap);
 				fiemap = 0;
+			} else {
+				sfio_print(SFIO_L_DBG, "use fiemap for input\n");
 			}
 			
 			if (fiemap->fm_mapped_extents == 0) {
@@ -822,6 +824,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		int i;
 		struct sparse_fio_v1_block v1_block;
 		
+		sfio_print(SFIO_L_DBG, "fiemap extents: %u\n", fiemap->fm_mapped_extents);
 		
 		if (transfer->oflags & SFIO_IS_PACKED) {
 			struct sparse_fio_v1_header v1_hdr;
