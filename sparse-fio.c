@@ -878,7 +878,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						return r;
 				} else {
 					if (
-						(transfer->oflags & SFIO_IS_BLOCKDEV) == 1 &&
+						(transfer->oflags & SFIO_IS_BLOCKDEV) != 0 &&
 						transfer->discard == 0 &&
 						transfer->write_zeroes_on_block_dev
 						)
