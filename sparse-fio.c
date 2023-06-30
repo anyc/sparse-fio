@@ -1267,6 +1267,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					// input is a memory-mapped file
 					
 					cur_block = input + transfer->ioffset;
+					
+					transfer->ioffset += chunk_size;
 				} else {
 					// we have to explictly read the data
 					
@@ -1420,8 +1422,6 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 							return r;
 					}
 				}
-				
-				transfer->ioffset += chunk_size;
 				
 				sfio_print_stats(transfer);
 			}
