@@ -781,7 +781,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 		memcpy(hdr.magic, "SPARSE_FIO", 10);
 		hdr.version = 1;
 		
-		sfio_print(SFIO_L_DBG, "write sfio hdr %zu\n", sizeof(hdr));
+		sfio_print(SFIO_L_DBG, "write sfio hdr (version %u size %zu)\n", hdr.version, sizeof(hdr));
 		r = write_helper_stream(transfer, &hdr, sizeof(hdr));
 		if (r < 0)
 			return r;
@@ -839,7 +839,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			v1_hdr.unpacked_size = transfer->isize; // input is not packed
 			v1_hdr.nonzero_size = transfer->isize_nonzero;
 			
-			sfio_print(SFIO_L_DBG, "write sfio v1 hdr %zu\n", sizeof(v1_hdr));
+			sfio_print(SFIO_L_DBG, "write sfio v1 hdr (unpacked %" PRIu64 " non-zero %" PRIu64 " size %zu)\n",
+					   v1_hdr.unpacked_size, v1_hdr.nonzero_size, sizeof(v1_hdr));
 			
 			r = write_helper_stream(transfer, &v1_hdr, sizeof(v1_hdr));
 			if (r < 0)
@@ -1189,7 +1190,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						bytes_read = read_helper_stream(transfer, cur_block, chunk_size);
 					}
 					
-					sfio_print(SFIO_L_DBG, "read %zd %"PRIu64" \n", bytes_read, iv1_block.size);
+					sfio_print(SFIO_L_DBG, "read bytes %zd, iblock_size %"PRIu64" \n", bytes_read, iv1_block.size);
 					
 					if (bytes_read < 0) {
 						sfio_print(SFIO_L_ERR, "read failed: %s\n", strerror(errno));
