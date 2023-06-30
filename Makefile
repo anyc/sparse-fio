@@ -9,10 +9,10 @@ includedir?=$(prefix)/include/
 app=sparse-fio
 lib=libsfio.so
 
-CFLAGS+=-D_FILE_OFFSET_BITS=64
+CFLAGS+=-D_FILE_OFFSET_BITS=64 -Wall
 
 ifeq ($(DEBUG),1)
-CFLAGS+=-g -Wall
+CFLAGS+=-g
 endif
 
 ifeq ($(NO_BENCHMARK),1)
