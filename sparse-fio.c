@@ -836,8 +836,8 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 // 			v1_hdr.n_blocks = htole64(fiemap->fm_mapped_extents);
 // 			v1_hdr.flags = SFIO_HDR_FLAG_HAS_TOC;
 			v1_hdr.flags = 0;
-			v1_hdr.unpacked_size = transfer->isize; // input is not packed
-			v1_hdr.nonzero_size = transfer->isize_nonzero;
+			v1_hdr.unpacked_size = htole64(transfer->isize); // input is not packed
+			v1_hdr.nonzero_size = htole64(transfer->isize_nonzero);
 			
 			sfio_print(SFIO_L_DBG, "write sfio v1 hdr (unpacked %" PRIu64 " non-zero %" PRIu64 " size %zu)\n",
 					   v1_hdr.unpacked_size, v1_hdr.nonzero_size, sizeof(v1_hdr));
@@ -869,7 +869,11 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						ex_start);
 					v1_block.size = htole64(ex_length);
 					
-					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
+					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr (bstart %" PRIu64" bsize %" PRIu64 " size %zu\n",
+							   v1_block.start, v1_block.size, sizeof(v1_block));
+					
+					v1_block.start = htole64(v1_block.start);
+					v1_block.size = htole64(v1_block.size);
 					
 					r = write_helper_stream(transfer, &v1_block, sizeof(v1_block));
 					if (r < 0)
@@ -930,7 +934,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						ex_start);
 					v1_block.size = htole64(ex_length);
 					
-					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(v1_block));
+					sfio_print(SFIO_L_DBG, "write sfio v1 block hdr (bstart %" PRIu64" bsize %" PRIu64 " size %zu\n",
+							   v1_block.start, v1_block.size, sizeof(v1_block));
+					
+					v1_block.start = htole64(v1_block.start);
+					v1_block.size = htole64(v1_block.size);
+					
 					r = write_helper_stream(transfer, &v1_block, sizeof(v1_block));
 					if (r < 0)
 						return r;
@@ -984,7 +993,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				ov1_block.start = transfer->ioffset;
 				ov1_block.size = 0;
 				
-				sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
+				sfio_print(SFIO_L_DBG, "write sfio v1 block hdr (bstart %" PRIu64" bsize %" PRIu64 " size %zu\n",
+						   ov1_block.start, ov1_block.size, sizeof(ov1_block));
+				
+				ov1_block.start = htole64(ov1_block.start);
+				ov1_block.size = htole64(ov1_block.size);
+				
 				r = write_helper_stream(transfer, &ov1_block, sizeof(ov1_block));
 				if (r < 0)
 					return r;
@@ -1069,6 +1083,9 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			
 			transfer->ioffset += sizeof(struct sparse_fio_v1_header);
 			
+			v1_hdr.unpacked_size = le64toh(v1_hdr.unpacked_size);
+			v1_hdr.nonzero_size = le64toh(v1_hdr.nonzero_size);
+			
 			if (v1_hdr.unpacked_size) {
 				transfer->osize = v1_hdr.unpacked_size;
 				sfio_print(SFIO_L_INFO, "Unpacked total size:    %16zu (%6zu MB)\n", v1_hdr.unpacked_size, v1_hdr.unpacked_size / 1024 / 1024);
@@ -1086,7 +1103,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			struct sparse_fio_v1_header v1_hdr;
 			
 			v1_hdr.flags = 0;
-			v1_hdr.unpacked_size = transfer->isize;
+			v1_hdr.unpacked_size = htole64(transfer->isize);
 			v1_hdr.nonzero_size = 0; // unknown at this time
 			
 			sfio_print(SFIO_L_DBG, "write v1 hdr %zu\n", sizeof(v1_hdr));
@@ -1127,6 +1144,12 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 					return -EINVAL;
 				}
 				transfer->ioffset += sizeof(struct sparse_fio_v1_block);
+				
+				ov1_block.start = le64toh(ov1_block.start);
+				ov1_block.size = le64toh(ov1_block.size);
+				
+				sfio_print(SFIO_L_DBG, "read sfio v1 block hdr (bstart %" PRIu64" bsize %" PRIu64 " size %zu\n",
+						ov1_block.start, ov1_block.size, sizeof(ov1_block));
 				
 				iv1_block.start = transfer->ioffset;
 				iv1_block.size = ov1_block.size;
@@ -1289,6 +1312,9 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 						sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
 						sfio_print(SFIO_L_DBG, "write v1 block (start %"PRIu64" size %"PRIu64") sizeof %zu\n", ov1_block.start, ov1_block.size, sizeof(ov1_block));
 						
+						ov1_block.start = htole64(ov1_block.start);
+						ov1_block.size = htole64(ov1_block.size);
+						
 						if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
 							r = write_helper_mmap(transfer, &ov1_block, sizeof(ov1_block));
 							if (r < 0)
@@ -1323,7 +1349,7 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 			sfio_print(SFIO_L_DBG, "handle trailing zeros\n");
 			
 			if (transfer->oflags & SFIO_IS_PACKED) {
-				ov1_block.start = transfer->ioffset;
+				ov1_block.start = htole64(transfer->ioffset);
 				ov1_block.size = 0;
 				
 				sfio_print(SFIO_L_DBG, "write sfio v1 block hdr %zu\n", sizeof(ov1_block));
