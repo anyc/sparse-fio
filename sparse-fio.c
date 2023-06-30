@@ -1150,7 +1150,93 @@ int sfio_transfer(struct sparse_fio_transfer *transfer) {
 				iv1_block.start = transfer->ioffset;
 				iv1_block.size = ov1_block.size;
 			}
-			sfio_print(SFIO_L_DBG, "will read block %"PRIu64" %"PRIu64" %"PRIu64" %"PRIu64"\n\n", iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);
+			
+			// do we have to insert space?
+			if (ov1_block.start > transfer->ooffset) {
+				chunk_size = ov1_block.start - transfer->ooffset;
+				
+				sfio_print(SFIO_L_DBG, "will create gap with %zu bytes\n", chunk_size);
+				
+				if ((transfer->oflags & SFIO_IS_STREAM) == 0) {
+					// create a gap in the output file
+					if ((transfer->oflags & SFIO_IS_BLOCKDEV) == 0) {
+						r = ftruncate(transfer->ofd, transfer->ooffset + chunk_size);
+						if (r < 0) {
+							sfio_print(SFIO_L_ERR, "ftruncate (gap) failed: %s\n", strerror(errno));
+							return r;
+						}
+						
+						transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
+						if (transfer->ooffset == sizeof(off_t)-1) {
+							sfio_print(SFIO_L_ERR, "lseek failed: %s\n", strerror(errno));
+							return -errno;
+						}
+					} else {
+						/* 
+						 * if the BLKDISCARD was successful, the next part of
+						 * the block device contains only zeroes. If not, we have to
+						 * write the zeroes ourselves
+						 */
+						
+						if (transfer->discard == 0 && transfer->write_zeroes_on_block_dev) {
+							// write zeros
+							
+							unsigned int written;
+							size_t to_write_bytes;
+							
+							cur_block = malloc(max_chunk_size);
+							if (!cur_block) {
+								sfio_print(SFIO_L_ERR, "malloc failed\n");
+								exit(1);
+							}
+							
+							written = chunk_size;
+							while (chunk_size > 0) {
+								if (chunk_size < max_chunk_size)
+									to_write_bytes = chunk_size;
+								else
+									to_write_bytes = max_chunk_size;
+								r = write_helper_stream(transfer, cur_block, to_write_bytes);
+								if (r < 0)
+									return r;
+								written -= max_chunk_size;
+							}
+						} else {
+							transfer->ooffset = lseek(transfer->ofd, chunk_size, SEEK_CUR);
+							if (transfer->ooffset == sizeof(off_t)-1) {
+								sfio_print(SFIO_L_ERR, "lseek failed: %s\n", strerror(errno));
+								return -errno;
+							}
+						}
+					}
+				} else {
+					// write zeros
+					
+					unsigned int written;
+					size_t to_write_bytes;
+					
+					cur_block = malloc(max_chunk_size);
+					if (!cur_block) {
+						sfio_print(SFIO_L_ERR, "malloc failed\n");
+						exit(1);
+					}
+					
+					written = chunk_size;
+					while (chunk_size > 0) {
+						if (chunk_size < max_chunk_size)
+							to_write_bytes = chunk_size;
+						else
+							to_write_bytes = max_chunk_size;
+						r = write_helper_stream(transfer, cur_block, to_write_bytes);
+						if (r < 0)
+							return r;
+						written -= max_chunk_size;
+					}
+				}
+			}
+			
+			sfio_print(SFIO_L_DBG, "will read block in_start %"PRIu64" in_size %"PRIu64" out_start %"PRIu64" out_size %"PRIu64"\n\n",
+					   iv1_block.start, iv1_block.size, ov1_block.start, ov1_block.size);
 			sfio_print(SFIO_L_DBG, "\n");
 			
 			if ((transfer->iflags & SFIO_IS_STREAM) == 0) {
